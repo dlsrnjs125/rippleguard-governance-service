@@ -24,8 +24,13 @@ public class LoanEventConsumer {
 
     @KafkaListener(topics = "${rippleguard.kafka.topics.loan-application-submitted}")
     public void onLoanApplicationSubmitted(String message) {
-        EventEnvelope event = json.fromJson(message, EventEnvelope.class);
-        log.info("Consumed loan application submitted eventId={}", event.eventId());
-        service.handleLoanApplicationSubmitted(event);
+        try {
+            EventEnvelope event = json.fromJson(message, EventEnvelope.class);
+            log.info("Consumed loan application submitted eventId={}", event.eventId());
+            service.handleLoanApplicationSubmitted(event);
+        } catch (IllegalArgumentException exception) {
+            service.quarantineMalformedEvent(message, exception.getMessage());
+            log.warn("Quarantined malformed governance input reason={}", exception.getMessage());
+        }
     }
 }

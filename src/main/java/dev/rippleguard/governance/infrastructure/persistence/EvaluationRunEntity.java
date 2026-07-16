@@ -30,6 +30,21 @@ public class EvaluationRunEntity {
     @Column(name = "rule_version", nullable = false, length = 64)
     private String ruleVersion;
 
+    @Column(name = "execution_plan_version", nullable = false, length = 64)
+    private String executionPlanVersion;
+
+    @Column(name = "component_versions", nullable = false, columnDefinition = "text")
+    private String componentVersions;
+
+    @Column(name = "policy_input_version", nullable = false, length = 64)
+    private String policyInputVersion;
+
+    @Column(name = "policy_bundle_version", nullable = false, length = 64)
+    private String policyBundleVersion;
+
+    @Column(name = "supersedes_run_id")
+    private UUID supersedesRunId;
+
     @Column(name = "input_snapshot_version", nullable = false, length = 64)
     private String inputSnapshotVersion;
 
@@ -50,8 +65,8 @@ public class EvaluationRunEntity {
     @Column(name = "reason_codes", columnDefinition = "text")
     private String reasonCodes;
 
-    @Column(name = "requested_at", nullable = false)
-    private Instant requestedAt;
+    @Column(name = "created_at", nullable = false)
+    private Instant createdAt;
 
     @Column(name = "completed_at")
     private Instant completedAt;
@@ -64,19 +79,32 @@ public class EvaluationRunEntity {
     }
 
     public EvaluationRunEntity(UUID evaluationRunId, DecisionCaseEntity decisionCase, String ruleVersion,
-                               String inputSnapshotVersion, UUID decisionId, Instant requestedAt) {
+                               String inputSnapshotVersion, UUID decisionId, String componentVersions,
+                               Instant createdAt) {
         this.evaluationRunId = evaluationRunId;
         this.decisionCase = decisionCase;
         this.ruleVersion = ruleVersion;
+        this.executionPlanVersion = ruleVersion;
+        this.componentVersions = componentVersions;
+        this.policyInputVersion = "phase1-no-opa";
+        this.policyBundleVersion = "phase1-no-opa";
+        this.supersedesRunId = null;
         this.inputSnapshotVersion = inputSnapshotVersion;
         this.decisionId = decisionId;
-        this.status = EvaluationRunStatus.REQUESTED;
-        this.requestedAt = requestedAt;
+        this.status = EvaluationRunStatus.CREATED;
+        this.createdAt = createdAt;
+    }
+
+    public void start() {
+        if (status != EvaluationRunStatus.CREATED) {
+            throw new IllegalStateException("Evaluation run is not startable: " + status);
+        }
+        this.status = EvaluationRunStatus.RUNNING;
     }
 
     public void complete(FinalDecision proposal, BigDecimal confidence, String reasonCodes, Instant completedAt) {
-        if (status != EvaluationRunStatus.REQUESTED) {
-            throw new IllegalStateException("Evaluation run is not requestable: " + status);
+        if (status != EvaluationRunStatus.RUNNING) {
+            throw new IllegalStateException("Evaluation run is not running: " + status);
         }
         this.status = EvaluationRunStatus.COMPLETED;
         this.proposal = proposal;
@@ -95,6 +123,26 @@ public class EvaluationRunEntity {
 
     public String getRuleVersion() {
         return ruleVersion;
+    }
+
+    public String getExecutionPlanVersion() {
+        return executionPlanVersion;
+    }
+
+    public String getComponentVersions() {
+        return componentVersions;
+    }
+
+    public String getPolicyInputVersion() {
+        return policyInputVersion;
+    }
+
+    public String getPolicyBundleVersion() {
+        return policyBundleVersion;
+    }
+
+    public UUID getSupersedesRunId() {
+        return supersedesRunId;
     }
 
     public String getInputSnapshotVersion() {
@@ -121,8 +169,8 @@ public class EvaluationRunEntity {
         return reasonCodes;
     }
 
-    public Instant getRequestedAt() {
-        return requestedAt;
+    public Instant getCreatedAt() {
+        return createdAt;
     }
 
     public Instant getCompletedAt() {

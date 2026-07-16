@@ -1,7 +1,10 @@
 package dev.rippleguard.governance.domain;
 
 public enum EvaluationRunStatus {
-    REQUESTED,
+    CREATED,
+    RUNNING,
     COMPLETED,
-    FAILED
+    BLOCKED,
+    FAILED,
+    CANCELLED
 }

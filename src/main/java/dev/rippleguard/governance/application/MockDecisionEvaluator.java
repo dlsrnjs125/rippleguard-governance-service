@@ -13,12 +13,15 @@ public class MockDecisionEvaluator {
     public static final String EVALUATOR_ID = "mock-evaluator";
 
     public MockEvaluationResult evaluate(UUID applicationId, String caseId, String inputSnapshotVersion) {
-        String seed = applicationId + ":" + caseId + ":" + inputSnapshotVersion + ":" + RULE_VERSION;
+        String seed = caseId + ":" + inputSnapshotVersion + ":" + RULE_VERSION;
         UUID evaluationRunId = UUID.nameUUIDFromBytes(("evaluation:" + seed).getBytes(StandardCharsets.UTF_8));
         UUID decisionId = UUID.nameUUIDFromBytes(("decision:" + seed).getBytes(StandardCharsets.UTF_8));
-        int bucket = Math.floorMod(seed.hashCode(), 100);
-        FinalDecision proposal = bucket >= 25 ? FinalDecision.APPROVE : FinalDecision.REJECT;
-        BigDecimal confidence = BigDecimal.valueOf(70 + (bucket % 25), 2);
+        FinalDecision proposal = inputSnapshotVersion.startsWith("snapshot-v-reject")
+                ? FinalDecision.REJECT
+                : FinalDecision.APPROVE;
+        BigDecimal confidence = proposal == FinalDecision.APPROVE
+                ? BigDecimal.valueOf(82, 2)
+                : BigDecimal.valueOf(76, 2);
         List<String> reasonCodes = proposal == FinalDecision.APPROVE
                 ? List.of("MOCK_RULE_LOW_SYNTHETIC_RISK")
                 : List.of("MOCK_RULE_SYNTHETIC_RISK_REVIEW");
@@ -27,8 +30,7 @@ public class MockDecisionEvaluator {
                 decisionId,
                 proposal,
                 confidence,
-                reasonCodes,
-                "ASSURANCE_COMPLETE"
+                reasonCodes
         );
     }
 }

@@ -74,6 +74,7 @@ class PostgresMigrationIntegrationTest {
         jdbc.update("delete from evaluation_run");
         jdbc.update("delete from outbox_event");
         jdbc.update("delete from inbox_event");
+        jdbc.update("delete from governance_event_quarantine");
         jdbc.update("delete from decision_case");
     }
 
@@ -124,8 +125,8 @@ class PostgresMigrationIntegrationTest {
                 }
         );
 
-        assertThat(results).filteredOn(Throwable.class::isInstance).hasSizeLessThanOrEqualTo(1);
-        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.DECISION_COMMANDED);
+        assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.RESOLVED);
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
     }
 

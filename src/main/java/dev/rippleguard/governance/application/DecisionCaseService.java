@@ -1,11 +1,15 @@
 package dev.rippleguard.governance.application;
 
 import dev.rippleguard.governance.domain.DecisionCaseStatus;
+import dev.rippleguard.governance.domain.AssuranceResult;
 import dev.rippleguard.governance.domain.FinalDecision;
+import dev.rippleguard.governance.domain.QuarantineFailureCode;
 import dev.rippleguard.governance.infrastructure.persistence.DecisionCaseEntity;
 import dev.rippleguard.governance.infrastructure.persistence.DecisionCaseRepository;
 import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunEntity;
 import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunRepository;
+import dev.rippleguard.governance.infrastructure.persistence.GovernanceEventQuarantineEntity;
+import dev.rippleguard.governance.infrastructure.persistence.GovernanceEventQuarantineRepository;
 import dev.rippleguard.governance.infrastructure.persistence.InboxEventEntity;
 import dev.rippleguard.governance.infrastructure.persistence.InboxEventRepository;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventEntity;
@@ -23,6 +27,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class DecisionCaseService {
@@ -33,54 +38,83 @@ public class DecisionCaseService {
     private final EvaluationRunRepository evaluationRuns;
     private final InboxEventRepository inbox;
     private final OutboxEventRepository outbox;
+    private final GovernanceEventQuarantineRepository quarantine;
     private final JsonSupport json;
     private final MockDecisionEvaluator evaluator;
+    private final MockAssuranceEvaluator assurance;
     private final Clock clock;
+    private final TransactionTemplate transactions;
 
     public DecisionCaseService(DecisionCaseRepository decisionCases,
                                EvaluationRunRepository evaluationRuns,
                                InboxEventRepository inbox,
                                OutboxEventRepository outbox,
+                               GovernanceEventQuarantineRepository quarantine,
                                JsonSupport json,
                                MockDecisionEvaluator evaluator,
-                               Clock clock) {
+                               MockAssuranceEvaluator assurance,
+                               Clock clock,
+                               TransactionTemplate transactions) {
         this.decisionCases = decisionCases;
         this.evaluationRuns = evaluationRuns;
         this.inbox = inbox;
         this.outbox = outbox;
+        this.quarantine = quarantine;
         this.json = json;
         this.evaluator = evaluator;
+        this.assurance = assurance;
         this.clock = clock;
+        this.transactions = transactions;
     }
 
-    @Transactional
-    public void handleLoanApplicationSubmitted(EventEnvelope event) {
-        requireEvent(event, "loan.application.submitted.v1", EVENT_SCHEMA_VERSION);
+    public synchronized void handleLoanApplicationSubmitted(EventEnvelope event) {
+        transactions.executeWithoutResult(status -> handleLoanApplicationSubmittedInTransaction(event));
+    }
+
+    private void handleLoanApplicationSubmittedInTransaction(EventEnvelope event) {
+        if (!supportsEvent(event, "loan.application.submitted.v1", EVENT_SCHEMA_VERSION)) {
+            quarantine(event, QuarantineFailureCode.UNSUPPORTED_SCHEMA_VERSION,
+                    "Unsupported event contract: " + event.eventType() + " " + event.schemaVersion(), false);
+            return;
+        }
         if (inbox.existsById(event.eventId())) {
             return;
         }
 
         LoanApplicationSubmittedPayload payload =
                 json.fromJson(event.payload().toString(), LoanApplicationSubmittedPayload.class);
-        validateSubmitted(event, payload);
-        if (decisionCases.findByApplicationId(payload.applicationId()).isPresent()) {
-            recordInbox(event);
+        validateEnvelope(event, payload);
+        String payloadHash = json.sha256(event.payload().toString());
+        var existingCase = decisionCases.findByApplicationId(payload.applicationId());
+        if (existingCase.isPresent()) {
+            DecisionCaseEntity existing = existingCase.get();
+            if (!existing.getSourcePayloadHash().equals(payloadHash)) {
+                existing.markRecalculationRequired("CONFLICTING_SUBMITTED_EVENT", clock.instant());
+            }
+            recordInbox(event, payloadHash);
             return;
         }
 
         Instant now = clock.instant();
         String caseId = "case-" + payload.applicationId();
-        MockEvaluationResult result = evaluator.evaluate(payload.applicationId(), caseId, payload.inputSnapshotVersion());
-
         DecisionCaseEntity decisionCase = decisionCases.saveAndFlush(new DecisionCaseEntity(
                 caseId,
                 payload.applicationId(),
                 payload.applicantId(),
                 payload.inputSnapshotVersion(),
+                payloadHash,
                 now
         ));
         outbox.save(reviewStartedEvent(decisionCase, event, now));
+        if (payload.inputSnapshotVersion() == null || payload.inputSnapshotVersion().isBlank()) {
+            decisionCase.markVerificationRequired("SNAPSHOT_REFERENCE_MISSING",
+                    AssuranceResult.ASSURANCE_INCOMPLETE.name(), now);
+            recordInbox(event, payloadHash);
+            return;
+        }
 
+        decisionCase.markPreflightCompleted(now);
+        MockEvaluationResult result = evaluator.evaluate(payload.applicationId(), caseId, payload.inputSnapshotVersion());
         decisionCase.transitionTo(DecisionCaseStatus.EVALUATION_REQUESTED, now);
         EvaluationRunEntity run = evaluationRuns.save(new EvaluationRunEntity(
                 result.evaluationRunId(),
@@ -88,21 +122,50 @@ public class DecisionCaseService {
                 MockDecisionEvaluator.RULE_VERSION,
                 payload.inputSnapshotVersion(),
                 result.decisionId(),
+                json.canonicalJson(componentVersions()),
                 now
         ));
         OutboxEventEntity requested = evaluationRequestedEvent(decisionCase, run, event.eventId(), now);
         outbox.save(requested);
 
+        run.start();
         run.complete(result.proposal(), result.confidence(), json.canonicalJson(result.reasonCodes()), now);
         decisionCase.completeEvaluation(now);
         OutboxEventEntity completed = evaluationCompletedEvent(decisionCase, run, requested.getEventId(), now);
         outbox.save(completed);
 
-        decisionCase.commandDecision(result.proposal(), result.assuranceResult(), now);
-        outbox.save(decisionCommandedEvent(decisionCase, run, result, completed.getEventId(), now));
-        recordInbox(event);
+        MockAssuranceResult assuranceResult = assurance.evaluate(payload, result);
+        if (assuranceResult.result() == AssuranceResult.ASSURANCE_INCOMPLETE) {
+            decisionCase.markVerificationRequired(assuranceResult.reasonCode(), assuranceResult.result().name(), now);
+            recordInbox(event, payloadHash);
+            return;
+        }
+        if (assuranceResult.result() == AssuranceResult.ASSURANCE_VIOLATED) {
+            decisionCase.markBlocked(assuranceResult.reasonCode(), assuranceResult.result().name(), now);
+            recordInbox(event, payloadHash);
+            return;
+        }
+
+        decisionCase.commandDecision(result.proposal(), assuranceResult.result().name(), now);
+        outbox.save(decisionCommandedEvent(decisionCase, run, result, assuranceResult, completed.getEventId(), now));
+        recordInbox(event, payloadHash);
         log.info("Decision case created applicationId={} caseId={} evaluationRunId={} finalDecision={}",
                 payload.applicationId(), caseId, run.getEvaluationRunId(), result.proposal());
+    }
+
+    @Transactional
+    public void quarantineMalformedEvent(String rawMessage, String failureMessage) {
+        quarantine.save(new GovernanceEventQuarantineEntity(
+                UUID.randomUUID(),
+                null,
+                null,
+                null,
+                json.sha256(rawMessage),
+                QuarantineFailureCode.MALFORMED_EVENT,
+                failureMessage,
+                clock.instant(),
+                false
+        ));
     }
 
     @Transactional(readOnly = true)
@@ -119,7 +182,7 @@ public class DecisionCaseService {
         return toResponse(decisionCase);
     }
 
-    private void validateSubmitted(EventEnvelope event, LoanApplicationSubmittedPayload payload) {
+    private void validateEnvelope(EventEnvelope event, LoanApplicationSubmittedPayload payload) {
         if (!"loan-service".equals(event.producer())) {
             throw new IllegalArgumentException("Submitted event producer must be loan-service");
         }
@@ -129,32 +192,41 @@ public class DecisionCaseService {
         if (!event.applicationId().toString().equals(event.correlationId())) {
             throw new IllegalArgumentException("Phase 1 correlationId must equal applicationId");
         }
-        if (payload.inputSnapshotVersion() == null || payload.inputSnapshotVersion().isBlank()) {
-            throw new IllegalArgumentException("Submitted event requires inputSnapshotVersion");
-        }
         if (payload.applicantId() == null || payload.applicantId().isBlank()) {
             throw new IllegalArgumentException("Submitted event requires applicantId");
         }
     }
 
-    private void requireEvent(EventEnvelope event, String eventType, String schemaVersion) {
-        if (!eventType.equals(event.eventType()) || !schemaVersion.equals(event.schemaVersion())) {
-            throw new IllegalArgumentException("Unsupported event contract: " + event.eventType() + " " + event.schemaVersion());
-        }
+    private boolean supportsEvent(EventEnvelope event, String eventType, String schemaVersion) {
+        return eventType.equals(event.eventType()) && schemaVersion.equals(event.schemaVersion());
     }
 
-    private void recordInbox(EventEnvelope event) {
+    private void recordInbox(EventEnvelope event, String payloadHash) {
         try {
             inbox.save(new InboxEventEntity(
                     event.eventId(),
                     event.eventType(),
                     event.applicationId(),
-                    json.sha256(event.payload().toString()),
+                    payloadHash,
                     clock.instant()
             ));
         } catch (DataIntegrityViolationException ignoredDuplicate) {
             log.info("Duplicate inbox event ignored eventId={}", event.eventId());
         }
+    }
+
+    private void quarantine(EventEnvelope event, QuarantineFailureCode failureCode, String failureMessage, boolean retryable) {
+        quarantine.save(new GovernanceEventQuarantineEntity(
+                UUID.randomUUID(),
+                event.eventId(),
+                event.eventType(),
+                event.schemaVersion(),
+                json.sha256(event.payload() == null ? "" : event.payload().toString()),
+                failureCode,
+                failureMessage,
+                clock.instant(),
+                retryable
+        ));
     }
 
     private OutboxEventEntity reviewStartedEvent(DecisionCaseEntity decisionCase, EventEnvelope cause, Instant now) {
@@ -172,7 +244,7 @@ public class DecisionCaseService {
         payload.put("evaluationRunId", run.getEvaluationRunId().toString());
         payload.put("decisionCaseId", decisionCase.getCaseId());
         payload.put("inputSnapshotVersion", run.getInputSnapshotVersion());
-        payload.put("executionPlanVersion", run.getRuleVersion());
+        payload.put("executionPlanVersion", run.getExecutionPlanVersion());
         payload.put("evaluationMode", "MOCK");
 
         return event("agent.evaluation.requested.v1", decisionCase, run.getEvaluationRunId(), causationId, payload, now);
@@ -214,7 +286,8 @@ public class DecisionCaseService {
     }
 
     private OutboxEventEntity decisionCommandedEvent(DecisionCaseEntity decisionCase, EvaluationRunEntity run,
-                                                     MockEvaluationResult result, UUID causationId, Instant now) {
+                                                     MockEvaluationResult result, MockAssuranceResult assuranceResult,
+                                                     UUID causationId, Instant now) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("commandId", commandId(decisionCase.getCaseId(), run.getEvaluationRunId()).toString());
         payload.put("decisionCaseId", decisionCase.getCaseId());
@@ -223,8 +296,8 @@ public class DecisionCaseService {
         payload.put("evaluationRunId", run.getEvaluationRunId().toString());
         payload.put("evaluationRunStatus", "COMPLETED");
         payload.put("finalDecision", result.proposal().name());
-        payload.put("assuranceResult", result.assuranceResult());
-        payload.put("reasonCodes", List.of("GOVERNANCE_VERIFIED_PROPOSAL"));
+        payload.put("assuranceResult", assuranceResult.result().name());
+        payload.put("reasonCodes", List.of(assuranceResult.reasonCode()));
         payload.put("issuedAt", now.toString());
         payload.put("idempotencyKey", "decision-command-" + decisionCase.getCaseId());
 
@@ -263,7 +336,7 @@ public class DecisionCaseService {
     }
 
     private DecisionCaseResponse toResponse(DecisionCaseEntity decisionCase) {
-        EvaluationRunEntity run = evaluationRuns.findFirstByDecisionCaseCaseIdOrderByRequestedAtDesc(decisionCase.getCaseId())
+        EvaluationRunEntity run = evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(decisionCase.getCaseId())
                 .orElse(null);
         return new DecisionCaseResponse(
                 "1.0.0",
@@ -278,6 +351,15 @@ public class DecisionCaseService {
                 decisionCase.getAssuranceResult(),
                 decisionCase.getCreatedAt(),
                 decisionCase.getUpdatedAt()
+        );
+    }
+
+    private List<Map<String, String>> componentVersions() {
+        return List.of(
+                Map.of("componentType", "MODEL", "componentName", "mock-model", "version", "mock-v1"),
+                Map.of("componentType", "PROMPT", "componentName", "no-prompt", "version", "phase1"),
+                Map.of("componentType", "TOOL", "componentName", "deterministic-rule", "version", MockDecisionEvaluator.RULE_VERSION),
+                Map.of("componentType", "AGENT", "componentName", MockDecisionEvaluator.EVALUATOR_ID, "version", "mock-evaluator-v1")
         );
     }
 }

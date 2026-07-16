@@ -5,5 +5,5 @@ import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface EvaluationRunRepository extends JpaRepository<EvaluationRunEntity, UUID> {
-    Optional<EvaluationRunEntity> findFirstByDecisionCaseCaseIdOrderByRequestedAtDesc(String caseId);
+    Optional<EvaluationRunEntity> findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(String caseId);
 }

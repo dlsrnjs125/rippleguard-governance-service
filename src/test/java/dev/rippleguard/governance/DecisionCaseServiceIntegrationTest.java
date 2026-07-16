@@ -1,15 +1,15 @@
 package dev.rippleguard.governance;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.rippleguard.governance.application.DecisionCaseService;
 import dev.rippleguard.governance.application.EventEnvelope;
 import dev.rippleguard.governance.application.MockDecisionEvaluator;
 import dev.rippleguard.governance.domain.DecisionCaseStatus;
+import dev.rippleguard.governance.domain.EvaluationRunStatus;
 import dev.rippleguard.governance.infrastructure.persistence.DecisionCaseRepository;
 import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunRepository;
+import dev.rippleguard.governance.infrastructure.persistence.GovernanceEventQuarantineRepository;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventRepository;
 import java.time.Instant;
 import java.util.Map;
@@ -35,6 +35,9 @@ class DecisionCaseServiceIntegrationTest {
     OutboxEventRepository outbox;
 
     @Autowired
+    GovernanceEventQuarantineRepository quarantine;
+
+    @Autowired
     ObjectMapper objectMapper;
 
     @Autowired
@@ -45,6 +48,7 @@ class DecisionCaseServiceIntegrationTest {
         jdbc.update("delete from evaluation_run");
         jdbc.update("delete from outbox_event");
         jdbc.update("delete from inbox_event");
+        jdbc.update("delete from governance_event_quarantine");
         jdbc.update("delete from decision_case");
     }
 
@@ -55,11 +59,12 @@ class DecisionCaseServiceIntegrationTest {
 
         var response = service.getByApplication(applicationId);
 
-        assertThat(response.status()).isEqualTo(DecisionCaseStatus.DECISION_COMMANDED);
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.RESOLVED);
         assertThat(response.evaluationRunId()).isNotNull();
+        assertThat(response.evaluationRunStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
         assertThat(response.finalDecision()).isNotNull();
         assertThat(decisionCases.findByApplicationId(applicationId)).isPresent();
-        assertThat(evaluationRuns.findFirstByDecisionCaseCaseIdOrderByRequestedAtDesc(response.caseId())).isPresent();
+        assertThat(evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())).isPresent();
         assertThat(outbox.findAll()).extracting("eventType")
                 .containsExactlyInAnyOrder(
                         "governance.review.started.v1",
@@ -92,7 +97,7 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
-    void rejectsUnsupportedSchemaVersion() {
+    void quarantinesUnsupportedSchemaVersion() {
         EventEnvelope event = submitted(UUID.fromString("10000000-0000-4000-8000-000000000004"));
         EventEnvelope badVersion = new EventEnvelope(
                 event.eventId(),
@@ -108,14 +113,14 @@ class DecisionCaseServiceIntegrationTest {
                 event.payload()
         );
 
-        assertThatThrownBy(() -> service.handleLoanApplicationSubmitted(badVersion))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Unsupported event contract");
+        service.handleLoanApplicationSubmitted(badVersion);
+
         assertThat(decisionCases.count()).isZero();
+        assertThat(quarantine.count()).isEqualTo(1);
     }
 
     @Test
-    void submittedEventRequiresSnapshotReference() {
+    void missingSnapshotCreatesVerificationRequiredCaseAndNoDecisionCommand() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000005");
         EventEnvelope event = event(applicationId, Map.of(
                 "applicationId", applicationId.toString(),
@@ -124,16 +129,47 @@ class DecisionCaseServiceIntegrationTest {
                 "submissionChannel", "WEB"
         ));
 
-        assertThatThrownBy(() -> service.handleLoanApplicationSubmitted(event))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("inputSnapshotVersion");
+        service.handleLoanApplicationSubmitted(event);
+
+        var response = service.getByApplication(applicationId);
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.VERIFICATION_REQUIRED);
+        assertThat(response.evaluationRunId()).isNull();
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsOnly("governance.review.started.v1");
+    }
+
+    @Test
+    void blockedSnapshotCreatesBlockedCaseAndNoDecisionCommand() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000006");
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v-blocked-001"));
+
+        var response = service.getByApplication(applicationId);
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(outbox.findAll()).extracting("eventType")
+                .doesNotContain("loan.decision.commanded.v1");
+    }
+
+    @Test
+    void conflictingSubmittedEventMarksRecalculationRequired() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000007");
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v1"));
+        service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v-reject-001"));
+
+        assertThat(service.getByApplication(applicationId).status())
+                .isEqualTo(DecisionCaseStatus.RECALCULATION_REQUIRED);
     }
 
     private EventEnvelope submitted(UUID applicationId) {
+        return submitted(applicationId, "snapshot-v1");
+    }
+
+    private EventEnvelope submitted(UUID applicationId, String snapshotVersion) {
         return event(applicationId, Map.of(
                 "applicationId", applicationId.toString(),
                 "applicantId", "customer-42",
-                "inputSnapshotVersion", "snapshot-v1",
+                "inputSnapshotVersion", snapshotVersion,
                 "submittedAt", Instant.now().toString(),
                 "submissionChannel", "WEB"
         ));

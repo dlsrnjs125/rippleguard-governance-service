@@ -10,7 +10,6 @@ public record MockEvaluationResult(
         UUID decisionId,
         FinalDecision proposal,
         BigDecimal confidence,
-        List<String> reasonCodes,
-        String assuranceResult
+        List<String> reasonCodes
 ) {
 }

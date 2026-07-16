@@ -9,6 +9,8 @@
 7. Complete deterministic mock evaluation.
 8. Write `agent.evaluation.completed.v1` to outbox.
 9. Complete mock assurance.
-10. Write `loan.decision.commanded.v1` to outbox.
+10. Evaluate mock assurance.
+11. If assurance is complete, write `loan.decision.commanded.v1` to outbox and resolve the case.
+12. If assurance is incomplete or violated, move to `VERIFICATION_REQUIRED` or `BLOCKED` and do not emit a decision command.
 
-Kafka publish failure leaves rows in the outbox for retry. DB failure prevents inbox completion.
+Kafka publish failure leaves rows in the outbox for retry. DB failure prevents inbox completion. Unknown schema versions are quarantined and are not treated as completed inbox records.
