@@ -1,0 +1,30 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:rippleguard_governance;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+  kafka:
+    bootstrap-servers: localhost:9092
+
+rippleguard:
+  kafka:
+    enabled: false
+  outbox:
+    batch-size: 10
+    lease-seconds: 60
+    instance-id: test-instance
+
+management:
+  health:
+    kafka:
+      enabled: false
+
+logging:
+  level:
+    root: warn
+    dev.rippleguard.governance: info
