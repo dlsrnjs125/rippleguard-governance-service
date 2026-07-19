@@ -5,9 +5,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.rippleguard.governance.application.DecisionCaseService;
 import dev.rippleguard.governance.application.EventEnvelope;
+import dev.rippleguard.governance.application.MockDecisionEvaluator;
 import dev.rippleguard.governance.domain.DecisionCaseStatus;
+import dev.rippleguard.governance.domain.FinalDecision;
+import dev.rippleguard.governance.infrastructure.persistence.DecisionCaseRepository;
+import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunEntity;
+import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunRepository;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventEntity;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventRepository;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -56,6 +62,12 @@ class PostgresMigrationIntegrationTest {
 
     @Autowired
     OutboxEventRepository outbox;
+
+    @Autowired
+    DecisionCaseRepository decisionCases;
+
+    @Autowired
+    EvaluationRunRepository evaluationRuns;
 
     @Autowired
     TransactionTemplate transactions;
@@ -130,6 +142,99 @@ class PostgresMigrationIntegrationTest {
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
     }
 
+    @Test
+    void concurrentSameApplicationSamePayloadCreatesSingleCaseAndRecordsBothEvents() throws Exception {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000092");
+        EventEnvelope first = submitted(applicationId);
+        EventEnvelope second = new EventEnvelope(
+                UUID.randomUUID(),
+                first.eventType(),
+                first.schemaVersion(),
+                first.occurredAt(),
+                first.producer(),
+                first.applicationId(),
+                first.caseId(),
+                first.evaluationRunId(),
+                first.correlationId(),
+                first.causationId(),
+                first.payload()
+        );
+
+        var results = runConcurrently(
+                () -> {
+                    service.handleLoanApplicationSubmitted(first);
+                    return null;
+                },
+                () -> {
+                    service.handleLoanApplicationSubmitted(second);
+                    return null;
+                }
+        );
+
+        assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.RESOLVED);
+        assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(2);
+    }
+
+    @Test
+    void concurrentSameApplicationDifferentPayloadMarksRecalculationRequired() throws Exception {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000093");
+        EventEnvelope first = submitted(applicationId, "snapshot-v1");
+        EventEnvelope second = submitted(applicationId, "snapshot-v-reject-001");
+
+        var results = runConcurrently(
+                () -> {
+                    service.handleLoanApplicationSubmitted(first);
+                    return null;
+                },
+                () -> {
+                    service.handleLoanApplicationSubmitted(second);
+                    return null;
+                }
+        );
+
+        assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.RECALCULATION_REQUIRED);
+        assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(2);
+    }
+
+    @Test
+    void evaluationRunsAllowSupersedingRunForSameCaseAndLatestLookupReturnsNewestRun() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000094");
+        service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v1"));
+        var decisionCase = decisionCases.findByApplicationId(applicationId).orElseThrow();
+        var firstRun = evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(decisionCase.getCaseId())
+                .orElseThrow();
+        UUID firstRunId = firstRun.getEvaluationRunId();
+        FinalDecision firstProposal = firstRun.getProposal();
+        Instant secondCreatedAt = firstRun.getCreatedAt().plusSeconds(60);
+        EvaluationRunEntity secondRun = new EvaluationRunEntity(
+                UUID.randomUUID(),
+                decisionCase,
+                MockDecisionEvaluator.RULE_VERSION,
+                "snapshot-v2",
+                UUID.randomUUID(),
+                "[]",
+                firstRunId,
+                secondCreatedAt
+        );
+        secondRun.start();
+        secondRun.complete(FinalDecision.REJECT, new BigDecimal("0.6100"), "[\"RECALCULATED\"]", secondCreatedAt);
+
+        evaluationRuns.saveAndFlush(secondRun);
+
+        var reloadedFirstRun = evaluationRuns.findById(firstRunId).orElseThrow();
+        var latestRun = evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(decisionCase.getCaseId())
+                .orElseThrow();
+        assertThat(evaluationRuns.count()).isEqualTo(2);
+        assertThat(reloadedFirstRun.getProposal()).isEqualTo(firstProposal);
+        assertThat(latestRun.getEvaluationRunId()).isEqualTo(secondRun.getEvaluationRunId());
+        assertThat(latestRun.getSupersedesRunId()).isEqualTo(firstRunId);
+    }
+
     private List<Object> runConcurrently(ThrowingSupplier<?> first, ThrowingSupplier<?> second) throws Exception {
         var executor = Executors.newFixedThreadPool(2);
         try {
@@ -159,6 +264,10 @@ class PostgresMigrationIntegrationTest {
     }
 
     private EventEnvelope submitted(UUID applicationId) {
+        return submitted(applicationId, "snapshot-v1");
+    }
+
+    private EventEnvelope submitted(UUID applicationId, String snapshotVersion) {
         return new EventEnvelope(
                 UUID.randomUUID(),
                 "loan.application.submitted.v1",
@@ -173,7 +282,7 @@ class PostgresMigrationIntegrationTest {
                 objectMapper.valueToTree(Map.of(
                         "applicationId", applicationId.toString(),
                         "applicantId", "customer-42",
-                        "inputSnapshotVersion", "snapshot-v1",
+                        "inputSnapshotVersion", snapshotVersion,
                         "submittedAt", Instant.now().toString(),
                         "submissionChannel", "WEB"
                 ))

@@ -67,8 +67,14 @@ public class DecisionCaseService {
         this.transactions = transactions;
     }
 
-    public synchronized void handleLoanApplicationSubmitted(EventEnvelope event) {
-        transactions.executeWithoutResult(status -> handleLoanApplicationSubmittedInTransaction(event));
+    public void handleLoanApplicationSubmitted(EventEnvelope event) {
+        try {
+            transactions.executeWithoutResult(status -> handleLoanApplicationSubmittedInTransaction(event));
+        } catch (DataIntegrityViolationException conflict) {
+            if (!recoverConcurrentDecisionCase(event)) {
+                throw conflict;
+            }
+        }
     }
 
     private void handleLoanApplicationSubmittedInTransaction(EventEnvelope event) {
@@ -151,6 +157,33 @@ public class DecisionCaseService {
         recordInbox(event, payloadHash);
         log.info("Decision case created applicationId={} caseId={} evaluationRunId={} finalDecision={}",
                 payload.applicationId(), caseId, run.getEvaluationRunId(), result.proposal());
+    }
+
+    private boolean recoverConcurrentDecisionCase(EventEnvelope event) {
+        return Boolean.TRUE.equals(transactions.execute(status -> {
+            if (!supportsEvent(event, "loan.application.submitted.v1", EVENT_SCHEMA_VERSION)) {
+                return false;
+            }
+            if (inbox.existsById(event.eventId())) {
+                return true;
+            }
+
+            LoanApplicationSubmittedPayload payload =
+                    json.fromJson(event.payload().toString(), LoanApplicationSubmittedPayload.class);
+            validateEnvelope(event, payload);
+            String payloadHash = json.sha256(event.payload().toString());
+            return decisionCases.findByApplicationId(payload.applicationId())
+                    .map(existing -> {
+                        if (!existing.getSourcePayloadHash().equals(payloadHash)) {
+                            existing.markRecalculationRequired("CONCURRENT_CONFLICTING_SUBMITTED_EVENT", clock.instant());
+                        }
+                        recordInbox(event, payloadHash);
+                        log.info("Recovered concurrent submitted event applicationId={} caseId={} eventId={}",
+                                payload.applicationId(), existing.getCaseId(), event.eventId());
+                        return true;
+                    })
+                    .orElse(false);
+        }));
     }
 
     @Transactional

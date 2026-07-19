@@ -43,11 +43,13 @@ create table evaluation_run (
     created_at timestamp with time zone not null,
     completed_at timestamp with time zone,
     version bigint not null,
-    constraint uq_evaluation_run_case unique (case_id),
     constraint ck_evaluation_run_status check (status in ('CREATED', 'RUNNING', 'COMPLETED', 'BLOCKED', 'FAILED', 'CANCELLED')),
     constraint ck_evaluation_run_proposal check (proposal is null or proposal in ('APPROVE', 'REJECT')),
     constraint ck_evaluation_run_confidence check (confidence is null or (confidence >= 0 and confidence <= 1))
 );
+
+create index ix_evaluation_run_case_created on evaluation_run(case_id, created_at desc);
+create unique index uq_evaluation_run_superseded_by on evaluation_run(supersedes_run_id);
 
 create table outbox_event (
     event_id uuid primary key,

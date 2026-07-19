@@ -81,6 +81,12 @@ public class EvaluationRunEntity {
     public EvaluationRunEntity(UUID evaluationRunId, DecisionCaseEntity decisionCase, String ruleVersion,
                                String inputSnapshotVersion, UUID decisionId, String componentVersions,
                                Instant createdAt) {
+        this(evaluationRunId, decisionCase, ruleVersion, inputSnapshotVersion, decisionId, componentVersions, null, createdAt);
+    }
+
+    public EvaluationRunEntity(UUID evaluationRunId, DecisionCaseEntity decisionCase, String ruleVersion,
+                               String inputSnapshotVersion, UUID decisionId, String componentVersions,
+                               UUID supersedesRunId, Instant createdAt) {
         this.evaluationRunId = evaluationRunId;
         this.decisionCase = decisionCase;
         this.ruleVersion = ruleVersion;
@@ -88,7 +94,7 @@ public class EvaluationRunEntity {
         this.componentVersions = componentVersions;
         this.policyInputVersion = "phase1-no-opa";
         this.policyBundleVersion = "phase1-no-opa";
-        this.supersedesRunId = null;
+        this.supersedesRunId = supersedesRunId;
         this.inputSnapshotVersion = inputSnapshotVersion;
         this.decisionId = decisionId;
         this.status = EvaluationRunStatus.CREATED;
