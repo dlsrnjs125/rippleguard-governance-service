@@ -58,7 +58,8 @@ class DecisionCaseServiceIntegrationTest {
     @Test
     void submittedEventCreatesCaseEvaluationAndDecisionCommandOutbox() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000001");
-        service.handleLoanApplicationSubmitted(submitted(applicationId));
+        EventEnvelope submitted = submitted(applicationId);
+        service.handleLoanApplicationSubmitted(submitted);
 
         var response = service.getByApplication(applicationId);
 
@@ -100,8 +101,10 @@ class DecisionCaseServiceIntegrationTest {
                         OutboxRow::eventType,
                         row -> eventId(row.payload())
                 ));
-        assertThat(causationId(payloadFor(rows, "governance.review.started.v1"))).isNotNull();
-        assertThat(causationId(payloadFor(rows, "agent.evaluation.requested.v1"))).isNotNull();
+        assertThat(causationId(payloadFor(rows, "governance.review.started.v1")))
+                .isEqualTo(submitted.eventId());
+        assertThat(causationId(payloadFor(rows, "agent.evaluation.requested.v1")))
+                .isEqualTo(submitted.eventId());
         assertThat(causationId(payloadFor(rows, "agent.evaluation.completed.v1")))
                 .isEqualTo(eventIdsByType.get("agent.evaluation.requested.v1"));
         assertThat(causationId(payloadFor(rows, "loan.decision.commanded.v1")))
