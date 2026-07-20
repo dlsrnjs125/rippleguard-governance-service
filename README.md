@@ -30,8 +30,19 @@ Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state,
 ```bash
 ./mvnw test
 ./mvnw package
-docker build -t rippleguard-governance-service:local .
+cp .env.example .env
+# Fill .env with local secret values.
+./scripts/run-local.sh
+./scripts/build-image.sh
 ```
+
+`scripts/build-image.sh` packages the service and builds
+`rippleguard-governance-service:<commit-sha-12>`. The image records
+`org.opencontainers.image.revision` as the full Git commit SHA and
+`org.opencontainers.image.source` as this repository URL. After this PR is
+merged, build the final Governance Service image from the new `main` merge
+commit in this repository. RippleGuard Infra records and verifies the immutable
+image baseline; Infra does not own the Governance image build.
 
 Mock evaluation is deterministic and not a real financial credit policy. Phase 1 executes mock requested/completed/assurance inside the service transaction for trace contract coverage; Agent Runtime integration is deferred.
 
