@@ -17,6 +17,8 @@ Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state,
 - Consumes: `loan.application.submitted.v1`
 - Publishes: `governance.review.started.v1`, `agent.evaluation.requested.v1`, `agent.evaluation.completed.v1`, `loan.decision.commanded.v1`
 
+Published Governance events use strictly increasing transaction-local occurrence timestamps so Audit can reconstruct the causation order without Infra or Audit-side rewrites.
+
 ## Environment
 
 - `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`

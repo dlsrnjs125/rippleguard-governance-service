@@ -122,6 +122,22 @@ class PostgresMigrationIntegrationTest {
     }
 
     @Test
+    void claimsGovernanceEventsInCausationOrderOnPostgreSql() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000095");
+        service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v1"));
+
+        var claimed = transactions.execute(status -> outbox.findClaimable(Instant.now().plusSeconds(60), 10));
+
+        assertThat(claimed).extracting(OutboxEventEntity::getEventType)
+                .containsExactly(
+                        "governance.review.started.v1",
+                        "agent.evaluation.requested.v1",
+                        "agent.evaluation.completed.v1",
+                        "loan.decision.commanded.v1"
+                );
+    }
+
+    @Test
     void duplicateSubmittedEventRaceCreatesSingleCase() throws Exception {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000091");
         EventEnvelope event = submitted(applicationId);
@@ -140,6 +156,7 @@ class PostgresMigrationIntegrationTest {
         assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
         assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.RESOLVED);
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(4);
     }
 
     @Test

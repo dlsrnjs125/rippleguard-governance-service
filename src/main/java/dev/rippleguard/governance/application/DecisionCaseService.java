@@ -101,7 +101,7 @@ public class DecisionCaseService {
             return;
         }
 
-        Instant now = clock.instant();
+        EventTimeline timeline = EventTimeline.startingAt(clock.instant());
         String caseId = "case-" + payload.applicationId();
         DecisionCaseEntity decisionCase = decisionCases.saveAndFlush(new DecisionCaseEntity(
                 caseId,
@@ -109,19 +109,19 @@ public class DecisionCaseService {
                 payload.applicantId(),
                 payload.inputSnapshotVersion(),
                 payloadHash,
-                now
+                timeline.reviewStartedAt()
         ));
-        outbox.save(reviewStartedEvent(decisionCase, event, now));
+        outbox.save(reviewStartedEvent(decisionCase, event, timeline.reviewStartedAt()));
         if (payload.inputSnapshotVersion() == null || payload.inputSnapshotVersion().isBlank()) {
             decisionCase.markVerificationRequired("SNAPSHOT_REFERENCE_MISSING",
-                    AssuranceResult.ASSURANCE_INCOMPLETE.name(), now);
+                    AssuranceResult.ASSURANCE_INCOMPLETE.name(), timeline.reviewStartedAt());
             recordInbox(event, payloadHash);
             return;
         }
 
-        decisionCase.markPreflightCompleted(now);
+        decisionCase.markPreflightCompleted(timeline.reviewStartedAt());
         MockEvaluationResult result = evaluator.evaluate(payload.applicationId(), caseId, payload.inputSnapshotVersion());
-        decisionCase.transitionTo(DecisionCaseStatus.EVALUATION_REQUESTED, now);
+        decisionCase.transitionTo(DecisionCaseStatus.EVALUATION_REQUESTED, timeline.evaluationRequestedAt());
         EvaluationRunEntity run = evaluationRuns.save(new EvaluationRunEntity(
                 result.evaluationRunId(),
                 decisionCase,
@@ -129,31 +129,37 @@ public class DecisionCaseService {
                 payload.inputSnapshotVersion(),
                 result.decisionId(),
                 json.canonicalJson(componentVersions()),
-                now
+                timeline.evaluationRequestedAt()
         ));
-        OutboxEventEntity requested = evaluationRequestedEvent(decisionCase, run, event.eventId(), now);
+        OutboxEventEntity requested = evaluationRequestedEvent(
+                decisionCase, run, event.eventId(), timeline.evaluationRequestedAt());
         outbox.save(requested);
 
         run.start();
-        run.complete(result.proposal(), result.confidence(), json.canonicalJson(result.reasonCodes()), now);
-        decisionCase.completeEvaluation(now);
-        OutboxEventEntity completed = evaluationCompletedEvent(decisionCase, run, requested.getEventId(), now);
+        run.complete(result.proposal(), result.confidence(), json.canonicalJson(result.reasonCodes()),
+                timeline.evaluationCompletedAt());
+        decisionCase.completeEvaluation(timeline.evaluationCompletedAt());
+        OutboxEventEntity completed = evaluationCompletedEvent(
+                decisionCase, run, requested.getEventId(), timeline.evaluationCompletedAt());
         outbox.save(completed);
 
         MockAssuranceResult assuranceResult = assurance.evaluate(payload, result);
         if (assuranceResult.result() == AssuranceResult.ASSURANCE_INCOMPLETE) {
-            decisionCase.markVerificationRequired(assuranceResult.reasonCode(), assuranceResult.result().name(), now);
+            decisionCase.markVerificationRequired(
+                    assuranceResult.reasonCode(), assuranceResult.result().name(), timeline.decisionCommandedAt());
             recordInbox(event, payloadHash);
             return;
         }
         if (assuranceResult.result() == AssuranceResult.ASSURANCE_VIOLATED) {
-            decisionCase.markBlocked(assuranceResult.reasonCode(), assuranceResult.result().name(), now);
+            decisionCase.markBlocked(
+                    assuranceResult.reasonCode(), assuranceResult.result().name(), timeline.decisionCommandedAt());
             recordInbox(event, payloadHash);
             return;
         }
 
-        decisionCase.commandDecision(result.proposal(), assuranceResult.result().name(), now);
-        outbox.save(decisionCommandedEvent(decisionCase, run, result, assuranceResult, completed.getEventId(), now));
+        decisionCase.commandDecision(result.proposal(), assuranceResult.result().name(), timeline.decisionCommandedAt());
+        outbox.save(decisionCommandedEvent(
+                decisionCase, run, result, assuranceResult, completed.getEventId(), timeline.decisionCommandedAt()));
         recordInbox(event, payloadHash);
         log.info("Decision case created applicationId={} caseId={} evaluationRunId={} finalDecision={}",
                 payload.applicationId(), caseId, run.getEvaluationRunId(), result.proposal());
@@ -394,5 +400,21 @@ public class DecisionCaseService {
                 Map.of("componentType", "TOOL", "componentName", "deterministic-rule", "version", MockDecisionEvaluator.RULE_VERSION),
                 Map.of("componentType", "AGENT", "componentName", MockDecisionEvaluator.EVALUATOR_ID, "version", "mock-evaluator-v1")
         );
+    }
+
+    private record EventTimeline(
+            Instant reviewStartedAt,
+            Instant evaluationRequestedAt,
+            Instant evaluationCompletedAt,
+            Instant decisionCommandedAt
+    ) {
+        static EventTimeline startingAt(Instant base) {
+            return new EventTimeline(
+                    base,
+                    base.plusMillis(1),
+                    base.plusMillis(2),
+                    base.plusMillis(3)
+            );
+        }
     }
 }
