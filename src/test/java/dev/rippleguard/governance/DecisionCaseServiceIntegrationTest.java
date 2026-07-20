@@ -11,7 +11,10 @@ import dev.rippleguard.governance.infrastructure.persistence.DecisionCaseReposit
 import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunRepository;
 import dev.rippleguard.governance.infrastructure.persistence.GovernanceEventQuarantineRepository;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventRepository;
+import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,7 +58,8 @@ class DecisionCaseServiceIntegrationTest {
     @Test
     void submittedEventCreatesCaseEvaluationAndDecisionCommandOutbox() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000001");
-        service.handleLoanApplicationSubmitted(submitted(applicationId));
+        EventEnvelope submitted = submitted(applicationId);
+        service.handleLoanApplicationSubmitted(submitted);
 
         var response = service.getByApplication(applicationId);
 
@@ -72,6 +76,39 @@ class DecisionCaseServiceIntegrationTest {
                         "agent.evaluation.completed.v1",
                         "loan.decision.commanded.v1"
                 );
+
+        List<OutboxRow> rows = outboxRowsByCreatedAt();
+        assertThat(rows).extracting(OutboxRow::eventType)
+                .containsExactly(
+                        "governance.review.started.v1",
+                        "agent.evaluation.requested.v1",
+                        "agent.evaluation.completed.v1",
+                        "loan.decision.commanded.v1"
+                );
+        assertThat(rows.get(0).createdAt()).isBefore(rows.get(1).createdAt());
+        assertThat(rows.get(1).createdAt()).isBefore(rows.get(2).createdAt());
+        assertThat(rows.get(2).createdAt()).isBefore(rows.get(3).createdAt());
+
+        List<Instant> occurredAt = rows.stream()
+                .map(row -> occurredAt(row.payload()))
+                .toList();
+        assertThat(occurredAt.get(0)).isBefore(occurredAt.get(1));
+        assertThat(occurredAt.get(1)).isBefore(occurredAt.get(2));
+        assertThat(occurredAt.get(2)).isBefore(occurredAt.get(3));
+
+        Map<String, UUID> eventIdsByType = rows.stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        OutboxRow::eventType,
+                        row -> eventId(row.payload())
+                ));
+        assertThat(causationId(payloadFor(rows, "governance.review.started.v1")))
+                .isEqualTo(submitted.eventId());
+        assertThat(causationId(payloadFor(rows, "agent.evaluation.requested.v1")))
+                .isEqualTo(submitted.eventId());
+        assertThat(causationId(payloadFor(rows, "agent.evaluation.completed.v1")))
+                .isEqualTo(eventIdsByType.get("agent.evaluation.requested.v1"));
+        assertThat(causationId(payloadFor(rows, "loan.decision.commanded.v1")))
+                .isEqualTo(eventIdsByType.get("agent.evaluation.completed.v1"));
     }
 
     @Test
@@ -189,5 +226,65 @@ class DecisionCaseServiceIntegrationTest {
                 null,
                 objectMapper.valueToTree(payload)
         );
+    }
+
+    private List<OutboxRow> outboxRowsByCreatedAt() {
+        return jdbc.query(
+                "select event_type, payload, created_at from outbox_event order by created_at",
+                (rs, rowNum) -> new OutboxRow(
+                        rs.getString("event_type"),
+                        rs.getString("payload"),
+                        toInstant(rs.getObject("created_at"))
+                )
+        );
+    }
+
+    private String payloadFor(List<OutboxRow> rows, String eventType) {
+        return rows.stream()
+                .filter(row -> row.eventType().equals(eventType))
+                .findFirst()
+                .orElseThrow()
+                .payload();
+    }
+
+    private Instant occurredAt(String payload) {
+        try {
+            return Instant.parse(objectMapper.readTree(payload).get("occurredAt").asText());
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private UUID eventId(String payload) {
+        try {
+            return UUID.fromString(objectMapper.readTree(payload).get("eventId").asText());
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private UUID causationId(String payload) {
+        try {
+            var value = objectMapper.readTree(payload).get("causationId");
+            return value == null || value.isNull() ? null : UUID.fromString(value.asText());
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private Instant toInstant(Object value) {
+        if (value instanceof Instant instant) {
+            return instant;
+        }
+        if (value instanceof OffsetDateTime offsetDateTime) {
+            return offsetDateTime.toInstant();
+        }
+        if (value instanceof Timestamp timestamp) {
+            return timestamp.toInstant();
+        }
+        throw new IllegalArgumentException("Unsupported timestamp type: " + value.getClass());
+    }
+
+    private record OutboxRow(String eventType, String payload, Instant createdAt) {
     }
 }

@@ -14,3 +14,5 @@
 12. If assurance is incomplete or violated, move to `VERIFICATION_REQUIRED` or `BLOCKED` and do not emit a decision command.
 
 Kafka publish failure leaves rows in the outbox for retry. DB failure prevents inbox completion. Unknown schema versions are quarantined and are not treated as completed inbox records.
+
+Within one submitted-event transaction, Governance assigns strictly increasing occurrence and outbox timestamps to `governance.review.started.v1`, `agent.evaluation.requested.v1`, `agent.evaluation.completed.v1`, and `loan.decision.commanded.v1`. This timestamp sequence expresses logical causation order inside the transaction; it is not intended to be a system-wide clock accuracy guarantee.

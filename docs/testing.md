@@ -13,6 +13,8 @@ Coverage includes:
 - unsupported version quarantine
 - PostgreSQL Flyway validation
 - PostgreSQL outbox claim query
+- strict Governance event timestamp and causation ordering
+- PostgreSQL outbox claim order for Governance event flow
 - duplicate event race behavior
 
 Run:

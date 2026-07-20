@@ -17,6 +17,8 @@ Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state,
 - Consumes: `loan.application.submitted.v1`
 - Publishes: `governance.review.started.v1`, `agent.evaluation.requested.v1`, `agent.evaluation.completed.v1`, `loan.decision.commanded.v1`
 
+Published Governance events use strictly increasing transaction-local occurrence timestamps so Audit can reconstruct the causation order without Infra or Audit-side rewrites.
+
 ## Environment
 
 - `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`
@@ -28,15 +30,15 @@ Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state,
 ## Run
 
 ```bash
-./mvnw test
-./mvnw package
+make test
+make package
 cp .env.example .env
 # Fill .env with local secret values.
-./scripts/run-local.sh
-./scripts/build-image.sh
+make run-local
+make build-image
 ```
 
-`scripts/build-image.sh` packages the service and builds
+`make build-image` packages the service and builds
 `rippleguard-governance-service:<commit-sha-12>`. The image records
 `org.opencontainers.image.revision` as the full Git commit SHA and
 `org.opencontainers.image.source` as this repository URL. After this PR is
