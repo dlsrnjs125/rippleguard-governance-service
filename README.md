@@ -30,6 +30,9 @@ Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state,
 ```bash
 ./mvnw test
 ./mvnw package
+cp .env.example .env
+# Fill .env with local secret values.
+./scripts/run-local.sh
 ./scripts/build-image.sh
 ```
 
