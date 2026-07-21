@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.rippleguard.governance.domain.AssuranceResult;
 import dev.rippleguard.governance.domain.DecisionCaseStatus;
+import dev.rippleguard.governance.domain.EvaluationRunStatus;
 import dev.rippleguard.governance.domain.QuarantineFailureCode;
 import dev.rippleguard.governance.infrastructure.agent.AgentRuntimeTimeoutException;
 import dev.rippleguard.governance.infrastructure.agent.AgentRuntimeTransportException;
@@ -32,6 +33,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -56,6 +58,7 @@ public class DecisionCaseService {
     private final Phase2ExecutionPlanProperties executionPlan;
     private final Clock clock;
     private final TransactionTemplate transactions;
+    private final String instanceId = "governance-" + UUID.randomUUID();
 
     public DecisionCaseService(DecisionCaseRepository decisionCases,
                                EvaluationRunRepository evaluationRuns,
@@ -100,13 +103,21 @@ public class DecisionCaseService {
             return;
         }
 
-        JsonNode result = executeWithRetry(execution);
-        AgentExecution plannedExecution = execution;
-        try {
-            transactions.executeWithoutResult(status -> validateAndRecordResult(plannedExecution, result));
-        } catch (OptimisticLockingFailureException conflict) {
-            recoverConcurrentDecisionCaseExecution(event);
+        executeAgentRun(execution);
+    }
+
+    @Scheduled(fixedDelayString = "${AGENT_RUNTIME_RECOVERY_DELAY_MS:5000}")
+    public void resumePendingPhase2AgentRuns() {
+        List<AgentExecution> executions = transactions.execute(status ->
+                evaluationRuns.findResumablePhase2Runs(clock.instant()).stream()
+                        .limit(10)
+                        .map(this::executionFromRun)
+                        .toList()
+        );
+        if (executions == null) {
+            return;
         }
+        executions.forEach(this::executeAgentRun);
     }
 
     private AgentExecution planAgentExecution(EventEnvelope event) {
@@ -116,7 +127,7 @@ public class DecisionCaseService {
             return null;
         }
         if (inbox.existsById(event.eventId())) {
-            return AgentExecution.skipped();
+            return resumeDuplicateEvent(event);
         }
 
         LoanApplicationSubmittedPayload payload =
@@ -154,7 +165,7 @@ public class DecisionCaseService {
         decisionCase.markPreflightCompleted(now);
         decisionCase.transitionTo(DecisionCaseStatus.EVALUATION_REQUESTED, now);
         EvaluationRunEntity run = createEvaluationRun(decisionCase, payload, event, payloadHash, now);
-        ObjectNode request = buildAgentRequest(decisionCase, run, event);
+        ObjectNode request = buildAgentRequest(decisionCase, run);
         contracts.validate(REQUEST_SCHEMA, request);
         run.start();
         recordInbox(event, payloadHash);
@@ -190,6 +201,10 @@ public class DecisionCaseService {
                 "snapshot-" + payload.applicationId(),
                 "1.0.0",
                 snapshotDigest,
+                cause.eventId(),
+                cause.occurredAt(),
+                "snapshot://" + payload.applicationId() + "/" + payload.inputSnapshotVersion(),
+                "IMMUTABLE_REFERENCE",
                 executionPlan.featureSchemaVersion(),
                 executionPlan.preprocessingVersion(),
                 executionPlan.modelVersion(),
@@ -202,37 +217,40 @@ public class DecisionCaseService {
         return evaluationRuns.saveAndFlush(run);
     }
 
-    private JsonNode executeWithRetry(AgentExecution execution) {
-        JsonNode latest = null;
-        int attempts = execution.request().path("agentRun").path("attemptId").asInt(0);
-        while (attempts < executionPlan.maxAttempts()) {
-            if (!clock.instant().isBefore(Instant.parse(execution.request().get("deadlineAt").asText()))) {
-                return failedResult(execution.request(), attempts + 1, "RETRYABLE", "AGENT_TIMEOUT",
-                        "Agent request deadline expired before execution.");
-            }
-            try {
-                latest = agentClient.execute(execution.request());
-                contracts.validate(RESULT_SCHEMA, latest);
-                int attemptId = latest.path("agentRun").path("attemptId").asInt(attempts + 1);
-                if (!isRetryableFailed(latest) || attemptId >= executionPlan.maxAttempts()) {
-                    return latest;
-                }
-                attempts = attemptId;
-            } catch (AgentRuntimeTimeoutException exception) {
-                attempts++;
-                latest = failedResult(execution.request(), attempts, "RETRYABLE", "AGENT_TIMEOUT",
-                        "Agent Runtime timed out.");
-            } catch (AgentRuntimeTransportException exception) {
-                attempts++;
-                latest = failedResult(execution.request(), attempts, "RETRYABLE", "AGENT_RUNTIME_TEMPORARY_FAILURE",
-                        "Agent Runtime transport failed.");
-            } catch (ContractValidationException exception) {
-                return failedResult(execution.request(), attempts + 1, "VALIDATION_REQUIRED", "CONTRACT_VALIDATION_FAILED",
-                        "Agent Runtime result failed official contract validation.");
-            }
+    private void executeAgentRun(AgentExecution execution) {
+        AttemptLease attempt = transactions.execute(status -> claimNextAttempt(execution));
+        if (attempt == null) {
+            return;
         }
-        return latest == null ? failedResult(execution.request(), attempts, "RETRYABLE", "RETRY_EXHAUSTED",
-                "Agent Runtime retry attempts were exhausted.") : latest;
+        if (!clock.instant().isBefore(Instant.parse(execution.request().get("deadlineAt").asText()))) {
+            transactions.executeWithoutResult(status -> recordTransportFailure(
+                    execution, attempt.attemptId(), "AGENT_TIMEOUT", true));
+            return;
+        }
+
+        try {
+            JsonNode result = agentClient.execute(execution.request());
+            contracts.validate(RESULT_SCHEMA, result);
+            int attemptId = result.path("agentRun").path("attemptId").asInt(attempt.attemptId());
+            if (isRetryableFailed(result) && attemptId < executionPlan.maxAttempts()) {
+                transactions.executeWithoutResult(status -> recordAgentRetryableFailure(execution, attemptId, result));
+                return;
+            }
+            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result));
+        } catch (AgentRuntimeTimeoutException exception) {
+            transactions.executeWithoutResult(status -> recordTransportFailure(
+                    execution, attempt.attemptId(), "AGENT_TIMEOUT", false));
+        } catch (AgentRuntimeTransportException exception) {
+            transactions.executeWithoutResult(status -> recordTransportFailure(
+                    execution, attempt.attemptId(), "AGENT_RUNTIME_TEMPORARY_FAILURE", false));
+        } catch (ContractValidationException exception) {
+            JsonNode result = failedResult(execution.request(), attempt.attemptId(),
+                    "VALIDATION_REQUIRED", "CONTRACT_VALIDATION_FAILED",
+                    "Agent Runtime result failed official contract validation.");
+            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result));
+        } catch (OptimisticLockingFailureException conflict) {
+            log.info("Skipped stale Phase 2 agent result evaluationRunId={}", execution.evaluationRunId());
+        }
     }
 
     private void validateAndRecordResult(AgentExecution execution, JsonNode result) {
@@ -244,6 +262,10 @@ public class DecisionCaseService {
         List<String> reasonCodes = validateResultSemantics(run, result);
         boolean completed = "COMPLETED".equals(result.path("resultStatus").asText());
         Instant completedAt = parseInstant(result.path("completedAt").asText());
+        if (decisionCase.getStatus() == DecisionCaseStatus.RECALCULATION_REQUIRED) {
+            run.failOrchestration("VALIDATION_REQUIRED", "SUPERSEDED_BY_CONFLICTING_INPUT", completedAt);
+            return;
+        }
         if (completed && reasonCodes.equals(validatedReasonCodes())) {
             run.completePhase2(resultDigest, json.canonicalJson(result.get("proposal")),
                     json.canonicalJson(result.get("proposal").get("reasonCodes")), completedAt);
@@ -265,6 +287,61 @@ public class DecisionCaseService {
         Instant validatedAt = completedAt.plusMillis(1);
         outbox.save(agentResultValidatedEvent(decisionCase, run, attemptId, resultDigest,
                 "REJECTED", reasonCodes, validatedAt));
+    }
+
+    private AttemptLease claimNextAttempt(AgentExecution execution) {
+        EvaluationRunEntity run = evaluationRuns.findById(execution.evaluationRunId()).orElseThrow();
+        if (run.getStatus() != EvaluationRunStatus.RUNNING) {
+            return null;
+        }
+        Instant now = clock.instant();
+        if (run.getLeaseUntil() != null && run.getLeaseUntil().isAfter(now)) {
+            return null;
+        }
+        if (run.getNextAttemptAt() != null && run.getNextAttemptAt().isAfter(now)) {
+            return null;
+        }
+        if (run.getAttemptCount() >= run.getMaxAttempts()) {
+            DecisionCaseEntity decisionCase = decisionCases.findById(execution.caseId()).orElseThrow();
+            run.failOrchestration("RETRYABLE", "RETRY_EXHAUSTED", now);
+            decisionCase.markVerificationRequired("RETRY_EXHAUSTED", "AGENT_RUNTIME_RETRY_EXHAUSTED", now);
+            return null;
+        }
+        int attemptId = run.getAttemptCount() + 1;
+        run.recordAttemptStarted(attemptId, now, instanceId, now.plus(executionPlan.leaseDuration()));
+        return new AttemptLease(attemptId);
+    }
+
+    private void recordAgentRetryableFailure(AgentExecution execution, int attemptId, JsonNode result) {
+        EvaluationRunEntity run = evaluationRuns.findById(execution.evaluationRunId()).orElseThrow();
+        run.recordAttempt(attemptId);
+        Instant now = clock.instant();
+        run.recordRetryableTransportFailure(
+                result.path("failure").path("reasonCode").asText("AGENT_RETRYABLE_FAILURE"),
+                now,
+                nextAttemptAt(attemptId, now)
+        );
+    }
+
+    private void recordTransportFailure(AgentExecution execution, int attemptId, String reasonCode, boolean deadlineExpired) {
+        EvaluationRunEntity run = evaluationRuns.findById(execution.evaluationRunId()).orElseThrow();
+        DecisionCaseEntity decisionCase = decisionCases.findById(execution.caseId()).orElseThrow();
+        run.recordAttempt(attemptId);
+        Instant now = clock.instant();
+        boolean exhausted = deadlineExpired
+                || attemptId >= run.getMaxAttempts()
+                || !nextAttemptAt(attemptId, now).isBefore(run.getDeadlineAt());
+        if (exhausted) {
+            run.failOrchestration("RETRYABLE", reasonCode, now);
+            decisionCase.markVerificationRequired(reasonCode, "AGENT_RUNTIME_TRANSPORT_FAILURE", now);
+            return;
+        }
+        run.recordRetryableTransportFailure(reasonCode, now, nextAttemptAt(attemptId, now));
+    }
+
+    private Instant nextAttemptAt(int attemptId, Instant now) {
+        long multiplier = Math.max(1, Math.min(8, 1L << Math.min(3, Math.max(0, attemptId - 1))));
+        return now.plus(executionPlan.retryBackoff().multipliedBy(multiplier));
     }
 
     private List<String> validateResultSemantics(EvaluationRunEntity run, JsonNode result) {
@@ -306,17 +383,17 @@ public class DecisionCaseService {
         return reasons.stream().distinct().toList();
     }
 
-    private ObjectNode buildAgentRequest(DecisionCaseEntity decisionCase, EvaluationRunEntity run, EventEnvelope cause) {
+    private ObjectNode buildAgentRequest(DecisionCaseEntity decisionCase, EvaluationRunEntity run) {
         Map<String, Object> snapshotReference = new LinkedHashMap<>();
         snapshotReference.put("schemaVersion", "1.0.0");
         snapshotReference.put("snapshotId", run.getSnapshotId());
         snapshotReference.put("snapshotVersion", run.getInputSnapshotVersion());
         snapshotReference.put("snapshotSchemaVersion", run.getSnapshotSchemaVersion());
-        snapshotReference.put("snapshotCreatedAt", cause.occurredAt().toString());
+        snapshotReference.put("snapshotCreatedAt", run.getSnapshotCreatedAt().toString());
         snapshotReference.put("digestAlgorithm", "sha256");
         snapshotReference.put("snapshotDigest", run.getSnapshotDigest());
-        snapshotReference.put("snapshotReference", "snapshot://" + decisionCase.getApplicationId() + "/" + run.getInputSnapshotVersion());
-        snapshotReference.put("referenceType", "IMMUTABLE_REFERENCE");
+        snapshotReference.put("snapshotReference", run.getSnapshotReference());
+        snapshotReference.put("referenceType", run.getReferenceType());
 
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("schemaVersion", "1.0.0");
@@ -334,7 +411,7 @@ public class DecisionCaseService {
         request.put("requestedAt", run.getRequestedAt().toString());
         request.put("deadlineAt", run.getDeadlineAt().toString());
         request.put("correlationId", decisionCase.getApplicationId().toString());
-        request.put("causationId", cause.eventId().toString());
+        request.put("causationId", run.getSourceEventId().toString());
         return json.toJsonNode(request).deepCopy();
     }
 
@@ -430,7 +507,7 @@ public class DecisionCaseService {
                 return null;
             }
             if (inbox.existsById(event.eventId())) {
-                return AgentExecution.skipped();
+                return resumeDuplicateEvent(event);
             }
             LoanApplicationSubmittedPayload payload =
                     json.fromJson(event.payload().toString(), LoanApplicationSubmittedPayload.class);
@@ -446,6 +523,31 @@ public class DecisionCaseService {
                     })
                     .orElse(null);
         });
+    }
+
+    private AgentExecution resumeDuplicateEvent(EventEnvelope event) {
+        LoanApplicationSubmittedPayload payload =
+                json.fromJson(event.payload().toString(), LoanApplicationSubmittedPayload.class);
+        validateEnvelope(event, payload);
+        String payloadHash = json.sha256(event.payload().toString());
+        return decisionCases.findByApplicationId(payload.applicationId())
+                .flatMap(decisionCase -> {
+                    if (!decisionCase.getSourcePayloadHash().equals(payloadHash)) {
+                        decisionCase.markRecalculationRequired("DUPLICATE_EVENT_PAYLOAD_CONFLICT", clock.instant());
+                        return java.util.Optional.<AgentExecution>empty();
+                    }
+                    return evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(decisionCase.getCaseId())
+                            .filter(run -> run.getStatus() == EvaluationRunStatus.RUNNING)
+                            .map(run -> executionFromRun(run));
+                })
+                .orElseGet(AgentExecution::skipped);
+    }
+
+    private AgentExecution executionFromRun(EvaluationRunEntity run) {
+        DecisionCaseEntity decisionCase = run.getDecisionCase();
+        ObjectNode request = buildAgentRequest(decisionCase, run);
+        contracts.validate(REQUEST_SCHEMA, request);
+        return new AgentExecution(null, decisionCase.getCaseId(), run.getEvaluationRunId(), run.getAgentRunId(), request, false);
     }
 
     @Transactional
@@ -618,5 +720,8 @@ public class DecisionCaseService {
         static AgentExecution skipped() {
             return new AgentExecution(null, null, null, null, null, true);
         }
+    }
+
+    private record AttemptLease(int attemptId) {
     }
 }

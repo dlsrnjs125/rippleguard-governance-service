@@ -3,9 +3,11 @@ package dev.rippleguard.governance;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.rippleguard.governance.application.LoanDecisionAgentClient;
+import dev.rippleguard.governance.infrastructure.agent.AgentRuntimeTimeoutException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
@@ -15,7 +17,25 @@ public class Phase2AgentClientTestConfiguration {
     @Bean
     @Primary
     LoanDecisionAgentClient testLoanDecisionAgentClient(ObjectMapper objectMapper) {
-        return request -> {
+        return new RecordingLoanDecisionAgentClient(objectMapper);
+    }
+
+    static final class RecordingLoanDecisionAgentClient implements LoanDecisionAgentClient {
+        private final ObjectMapper objectMapper;
+        private final AtomicInteger calls = new AtomicInteger();
+        private volatile int timeoutsBeforeSuccess;
+
+        RecordingLoanDecisionAgentClient(ObjectMapper objectMapper) {
+            this.objectMapper = objectMapper;
+        }
+
+        @Override
+        public JsonNode execute(JsonNode request) {
+            calls.incrementAndGet();
+            if (timeoutsBeforeSuccess > 0) {
+                timeoutsBeforeSuccess--;
+                throw new AgentRuntimeTimeoutException("test timeout", null);
+            }
             Map<String, Object> agentRun = new LinkedHashMap<>();
             agentRun.put("schemaVersion", "1.0.0");
             agentRun.put("decisionCaseId", request.get("decisionCaseId").asText());
@@ -58,6 +78,19 @@ public class Phase2AgentClientTestConfiguration {
             result.put("evidenceRefs", List.of(request.get("snapshotReference").get("snapshotReference").asText()));
             result.put("completedAt", request.get("requestedAt").asText());
             return objectMapper.valueToTree(result);
-        };
+        }
+
+        int calls() {
+            return calls.get();
+        }
+
+        void reset() {
+            calls.set(0);
+            timeoutsBeforeSuccess = 0;
+        }
+
+        void timeoutNextCalls(int count) {
+            timeoutsBeforeSuccess = count;
+        }
     }
 }

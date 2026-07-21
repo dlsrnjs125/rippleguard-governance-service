@@ -16,11 +16,19 @@ public record Phase2ExecutionPlanProperties(
         @NotBlank String modelArtifactDigest,
         @NotBlank String thresholdVersion,
         @Min(1) int maxAttempts,
-        Duration requestTimeout
+        Duration requestTimeout,
+        Duration retryBackoff,
+        Duration leaseDuration
 ) {
     public Phase2ExecutionPlanProperties {
         if (requestTimeout == null || requestTimeout.isNegative() || requestTimeout.isZero()) {
             throw new IllegalArgumentException("requestTimeout must be positive");
+        }
+        if (retryBackoff == null || retryBackoff.isNegative() || retryBackoff.isZero()) {
+            throw new IllegalArgumentException("retryBackoff must be positive");
+        }
+        if (leaseDuration == null || leaseDuration.isNegative() || leaseDuration.isZero()) {
+            throw new IllegalArgumentException("leaseDuration must be positive");
         }
         if (!modelArtifactDigest.matches("^sha256:[a-f0-9]{64}$")) {
             throw new IllegalArgumentException("modelArtifactDigest must be a sha256 digest");

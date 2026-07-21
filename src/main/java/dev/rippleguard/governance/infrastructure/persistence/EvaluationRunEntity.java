@@ -122,6 +122,33 @@ public class EvaluationRunEntity {
     @Column(name = "validation_outcome", length = 32)
     private String validationOutcome;
 
+    @Column(name = "source_event_id")
+    private UUID sourceEventId;
+
+    @Column(name = "snapshot_created_at")
+    private Instant snapshotCreatedAt;
+
+    @Column(name = "snapshot_reference", columnDefinition = "text")
+    private String snapshotReference;
+
+    @Column(name = "reference_type", length = 64)
+    private String referenceType;
+
+    @Column(name = "last_attempt_started_at")
+    private Instant lastAttemptStartedAt;
+
+    @Column(name = "next_attempt_at")
+    private Instant nextAttemptAt;
+
+    @Column(name = "lease_owner", length = 128)
+    private String leaseOwner;
+
+    @Column(name = "lease_until")
+    private Instant leaseUntil;
+
+    @Column(name = "last_transport_failure_code", length = 128)
+    private String lastTransportFailureCode;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -164,6 +191,10 @@ public class EvaluationRunEntity {
                                 String snapshotId,
                                 String snapshotSchemaVersion,
                                 String snapshotDigest,
+                                UUID sourceEventId,
+                                Instant snapshotCreatedAt,
+                                String snapshotReference,
+                                String referenceType,
                                 String featureSchemaVersion,
                                 String preprocessingVersion,
                                 String modelVersion,
@@ -182,6 +213,10 @@ public class EvaluationRunEntity {
         this.snapshotId = snapshotId;
         this.snapshotSchemaVersion = snapshotSchemaVersion;
         this.snapshotDigest = snapshotDigest;
+        this.sourceEventId = sourceEventId;
+        this.snapshotCreatedAt = snapshotCreatedAt;
+        this.snapshotReference = snapshotReference;
+        this.referenceType = referenceType;
         this.featureSchemaVersion = featureSchemaVersion;
         this.preprocessingVersion = preprocessingVersion;
         this.modelVersion = modelVersion;
@@ -190,6 +225,7 @@ public class EvaluationRunEntity {
         this.maxAttempts = maxAttempts;
         this.requestedAt = requestedAt;
         this.deadlineAt = deadlineAt;
+        this.nextAttemptAt = requestedAt;
     }
 
     public void start() {
@@ -214,6 +250,48 @@ public class EvaluationRunEntity {
         this.attemptCount = Math.max(this.attemptCount, attemptId);
     }
 
+    public void recordAttemptStarted(int attemptId, Instant startedAt, String leaseOwner, Instant leaseUntil) {
+        if (status != EvaluationRunStatus.RUNNING) {
+            throw new IllegalStateException("Evaluation run is not running: " + status);
+        }
+        recordAttempt(attemptId);
+        this.lastAttemptStartedAt = startedAt;
+        this.leaseOwner = leaseOwner;
+        this.leaseUntil = leaseUntil;
+        this.nextAttemptAt = startedAt;
+        this.lastTransportFailureCode = null;
+    }
+
+    public void recordRetryableTransportFailure(String reasonCode, Instant now, Instant nextAttemptAt) {
+        if (status != EvaluationRunStatus.RUNNING) {
+            throw new IllegalStateException("Evaluation run is not running: " + status);
+        }
+        this.failureClassification = "RETRYABLE";
+        this.failureReasonCode = reasonCode;
+        this.lastTransportFailureCode = reasonCode;
+        this.nextAttemptAt = nextAttemptAt;
+        this.leaseOwner = null;
+        this.leaseUntil = null;
+    }
+
+    public void releaseExecutionLease() {
+        this.leaseOwner = null;
+        this.leaseUntil = null;
+    }
+
+    public void failOrchestration(String classification, String reasonCode, Instant completedAt) {
+        if (status != EvaluationRunStatus.RUNNING) {
+            throw new IllegalStateException("Evaluation run is not running: " + status);
+        }
+        this.status = EvaluationRunStatus.FAILED;
+        this.failureClassification = classification;
+        this.failureReasonCode = reasonCode;
+        this.validationOutcome = "REJECTED";
+        this.completedAt = completedAt;
+        this.leaseOwner = null;
+        this.leaseUntil = null;
+    }
+
     public void completePhase2(String acceptedResultDigest,
                                String acceptedProposalSnapshot,
                                String reasonCodes,
@@ -227,6 +305,8 @@ public class EvaluationRunEntity {
         this.reasonCodes = reasonCodes;
         this.validationOutcome = "VALIDATED";
         this.completedAt = completedAt;
+        this.leaseOwner = null;
+        this.leaseUntil = null;
     }
 
     public void rejectPhase2(String classification, String reasonCode, String acceptedResultDigest, Instant completedAt) {
@@ -239,6 +319,8 @@ public class EvaluationRunEntity {
         this.acceptedResultDigest = acceptedResultDigest;
         this.validationOutcome = "REJECTED";
         this.completedAt = completedAt;
+        this.leaseOwner = null;
+        this.leaseUntil = null;
     }
 
     public UUID getEvaluationRunId() {
@@ -371,6 +453,42 @@ public class EvaluationRunEntity {
 
     public String getValidationOutcome() {
         return validationOutcome;
+    }
+
+    public UUID getSourceEventId() {
+        return sourceEventId;
+    }
+
+    public Instant getSnapshotCreatedAt() {
+        return snapshotCreatedAt;
+    }
+
+    public String getSnapshotReference() {
+        return snapshotReference;
+    }
+
+    public String getReferenceType() {
+        return referenceType;
+    }
+
+    public Instant getLastAttemptStartedAt() {
+        return lastAttemptStartedAt;
+    }
+
+    public Instant getNextAttemptAt() {
+        return nextAttemptAt;
+    }
+
+    public String getLeaseOwner() {
+        return leaseOwner;
+    }
+
+    public Instant getLeaseUntil() {
+        return leaseUntil;
+    }
+
+    public String getLastTransportFailureCode() {
+        return lastTransportFailureCode;
     }
 
     public Instant getCreatedAt() {

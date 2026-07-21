@@ -40,6 +40,8 @@ rippleguard:
       threshold-version: threshold.v1.0.0
       max-attempts: 2
       request-timeout: 30s
+      retry-backoff: 1s
+      lease-duration: 30s
 
 management:
   health:

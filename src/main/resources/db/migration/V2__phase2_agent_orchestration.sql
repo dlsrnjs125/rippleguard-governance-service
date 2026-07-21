@@ -17,6 +17,15 @@ alter table evaluation_run add column failure_reason_code varchar(128);
 alter table evaluation_run add column accepted_result_digest varchar(80);
 alter table evaluation_run add column accepted_proposal_snapshot text;
 alter table evaluation_run add column validation_outcome varchar(32);
+alter table evaluation_run add column source_event_id uuid;
+alter table evaluation_run add column snapshot_created_at timestamp with time zone;
+alter table evaluation_run add column snapshot_reference text;
+alter table evaluation_run add column reference_type varchar(64);
+alter table evaluation_run add column last_attempt_started_at timestamp with time zone;
+alter table evaluation_run add column next_attempt_at timestamp with time zone;
+alter table evaluation_run add column lease_owner varchar(128);
+alter table evaluation_run add column lease_until timestamp with time zone;
+alter table evaluation_run add column last_transport_failure_code varchar(128);
 
 create unique index uq_evaluation_run_agent_run_id
     on evaluation_run(agent_run_id);

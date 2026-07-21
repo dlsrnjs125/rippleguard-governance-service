@@ -40,7 +40,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest(properties = {
         "debug=false",
         "rippleguard.kafka.enabled=false",
-        "management.health.kafka.enabled=false"
+        "management.health.kafka.enabled=false",
+        "AGENT_RUNTIME_RECOVERY_DELAY_MS=600000"
 })
 @Import(Phase2AgentClientTestConfiguration.class)
 class PostgresMigrationIntegrationTest {

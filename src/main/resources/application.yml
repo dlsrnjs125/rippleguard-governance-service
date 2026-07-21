@@ -70,3 +70,5 @@ rippleguard:
       threshold-version: ${PHASE2_THRESHOLD_VERSION}
       max-attempts: ${AGENT_RUNTIME_MAX_ATTEMPTS:2}
       request-timeout: ${AGENT_RUNTIME_REQUEST_TIMEOUT:30s}
+      retry-backoff: ${AGENT_RUNTIME_RETRY_BACKOFF:2s}
+      lease-duration: ${AGENT_RUNTIME_LEASE_DURATION:30s}

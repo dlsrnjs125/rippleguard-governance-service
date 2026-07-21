@@ -8,6 +8,7 @@ import dev.rippleguard.governance.application.MockDecisionEvaluator;
 import dev.rippleguard.governance.domain.DecisionCaseStatus;
 import dev.rippleguard.governance.domain.EvaluationRunStatus;
 import dev.rippleguard.governance.infrastructure.persistence.DecisionCaseRepository;
+import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunEntity;
 import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunRepository;
 import dev.rippleguard.governance.infrastructure.persistence.GovernanceEventQuarantineRepository;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventRepository;
@@ -24,7 +25,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-@SpringBootTest(properties = "debug=false")
+@SpringBootTest(properties = {
+        "debug=false",
+        "AGENT_RUNTIME_RECOVERY_DELAY_MS=600000"
+})
 @Import(Phase2AgentClientTestConfiguration.class)
 class DecisionCaseServiceIntegrationTest {
     @Autowired
@@ -48,8 +52,12 @@ class DecisionCaseServiceIntegrationTest {
     @Autowired
     JdbcTemplate jdbc;
 
+    @Autowired
+    Phase2AgentClientTestConfiguration.RecordingLoanDecisionAgentClient agentClient;
+
     @BeforeEach
     void cleanDatabase() {
+        agentClient.reset();
         jdbc.update("delete from evaluation_run");
         jdbc.update("delete from outbox_event");
         jdbc.update("delete from inbox_event");
@@ -110,6 +118,47 @@ class DecisionCaseServiceIntegrationTest {
 
         assertThat(decisionCases.count()).isEqualTo(1);
         assertThat(outbox.count()).isEqualTo(2);
+    }
+
+    @Test
+    void duplicateSubmittedEventResumesRunningEvaluationAfterCrashWindow() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000008");
+        EventEnvelope event = submitted(applicationId);
+        agentClient.timeoutNextCalls(1);
+
+        service.handleLoanApplicationSubmitted(event);
+
+        var firstResponse = service.getByApplication(applicationId);
+        assertThat(firstResponse.status()).isEqualTo(DecisionCaseStatus.EVALUATION_REQUESTED);
+        EvaluationRunEntity pendingRun = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(firstResponse.caseId())
+                .orElseThrow();
+        assertThat(pendingRun.getStatus()).isEqualTo(EvaluationRunStatus.RUNNING);
+        assertThat(pendingRun.getAttemptCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(1);
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsOnly("governance.review.started.v1");
+
+        jdbc.update(
+                "update evaluation_run set next_attempt_at = ?, lease_until = null where evaluation_run_id = ?",
+                Timestamp.from(Instant.now().minusSeconds(1)),
+                pendingRun.getEvaluationRunId()
+        );
+        service.handleLoanApplicationSubmitted(event);
+
+        var recoveredResponse = service.getByApplication(applicationId);
+        assertThat(recoveredResponse.status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
+        EvaluationRunEntity completedRun = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(recoveredResponse.caseId())
+                .orElseThrow();
+        assertThat(completedRun.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
+        assertThat(completedRun.getAttemptCount()).isEqualTo(2);
+        assertThat(agentClient.calls()).isEqualTo(2);
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsExactlyInAnyOrder(
+                        "governance.review.started.v1",
+                        "governance.agent-result.validated.v1"
+                );
     }
 
     @Test
