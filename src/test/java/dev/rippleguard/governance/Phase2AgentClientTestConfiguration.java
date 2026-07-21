@@ -30,6 +30,7 @@ public class Phase2AgentClientTestConfiguration {
         private volatile Long completedAtSecondsAfterDeadline;
         private volatile String snapshotFieldOverride;
         private volatile String snapshotValueOverride;
+        private volatile boolean malformedResult;
 
         RecordingLoanDecisionAgentClient(ObjectMapper objectMapper) {
             this.objectMapper = objectMapper;
@@ -90,6 +91,9 @@ public class Phase2AgentClientTestConfiguration {
             if (snapshotFieldOverride != null) {
                 ((ObjectNode) node.get("snapshotReference")).put(snapshotFieldOverride, snapshotValueOverride);
             }
+            if (malformedResult) {
+                node.remove("resultStatus");
+            }
             return node;
         }
 
@@ -111,6 +115,7 @@ public class Phase2AgentClientTestConfiguration {
             completedAtSecondsAfterDeadline = null;
             snapshotFieldOverride = null;
             snapshotValueOverride = null;
+            malformedResult = false;
         }
 
         void timeoutNextCalls(int count) {
@@ -131,6 +136,10 @@ public class Phase2AgentClientTestConfiguration {
         void overrideSnapshotField(String field, String value) {
             snapshotFieldOverride = field;
             snapshotValueOverride = value;
+        }
+
+        void returnMalformedResult() {
+            malformedResult = true;
         }
     }
 }

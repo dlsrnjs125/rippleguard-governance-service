@@ -232,7 +232,13 @@ public class DecisionCaseService {
 
         try {
             JsonNode result = agentClient.execute(execution.request());
-            contracts.validate(RESULT_SCHEMA, result);
+            try {
+                contracts.validate(RESULT_SCHEMA, result);
+            } catch (ContractValidationException exception) {
+                transactions.executeWithoutResult(status ->
+                        recordContractInvalidResult(execution, attempt.attemptId(), result));
+                return;
+            }
             int attemptId = result.path("agentRun").path("attemptId").asInt(attempt.attemptId());
             if (isRetryableFailed(result) && attemptId < executionPlan.maxAttempts()) {
                 transactions.executeWithoutResult(status -> recordAgentRetryableFailure(execution, attemptId, result));
@@ -245,14 +251,26 @@ public class DecisionCaseService {
         } catch (AgentRuntimeTransportException exception) {
             transactions.executeWithoutResult(status -> recordTransportFailure(
                     execution, attempt.attemptId(), "AGENT_RUNTIME_TEMPORARY_FAILURE", false));
-        } catch (ContractValidationException exception) {
-            JsonNode result = failedResult(execution.request(), attempt.attemptId(),
-                    "VALIDATION_REQUIRED", "CONTRACT_VALIDATION_FAILED",
-                    "Agent Runtime result failed official contract validation.");
-            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result, attempt.attemptId()));
         } catch (OptimisticLockingFailureException conflict) {
             log.info("Skipped stale Phase 2 agent result evaluationRunId={}", execution.evaluationRunId());
         }
+    }
+
+    private void recordContractInvalidResult(AgentExecution execution, int claimedAttemptId, JsonNode malformedResult) {
+        EvaluationRunEntity run = evaluationRuns.findById(execution.evaluationRunId()).orElseThrow();
+        DecisionCaseEntity decisionCase = decisionCases.findById(execution.caseId()).orElseThrow();
+        if (run.getStatus() != EvaluationRunStatus.RUNNING) {
+            log.info("Ignored malformed stale Phase 2 agent result evaluationRunId={} status={}",
+                    run.getEvaluationRunId(), run.getStatus());
+            return;
+        }
+        run.recordAttempt(claimedAttemptId);
+        String resultDigest = json.sha256Prefixed(json.canonicalJson(malformedResult));
+        Instant now = clock.instant();
+        run.rejectPhase2("VALIDATION_REQUIRED", "CONTRACT_VALIDATION_FAILED", resultDigest, now);
+        decisionCase.markVerificationRequired("CONTRACT_VALIDATION_FAILED", "AGENT_RESULT_REJECTED", now);
+        outbox.save(agentResultValidatedEvent(decisionCase, run, claimedAttemptId, resultDigest,
+                "REJECTED", List.of("SCHEMA_INVALID"), now.plusMillis(1)));
     }
 
     private void validateAndRecordResult(AgentExecution execution, JsonNode result, int claimedAttemptId) {
@@ -455,40 +473,6 @@ public class DecisionCaseService {
         request.put("correlationId", decisionCase.getApplicationId().toString());
         request.put("causationId", run.getSourceEventId().toString());
         return json.toJsonNode(request).deepCopy();
-    }
-
-    private ObjectNode failedResult(JsonNode request, int attemptId, String classification, String reasonCode, String safeMessage) {
-        Instant now = clock.instant();
-        Map<String, Object> agentRun = new LinkedHashMap<>();
-        agentRun.put("schemaVersion", "1.0.0");
-        agentRun.put("decisionCaseId", request.get("decisionCaseId").asText());
-        agentRun.put("evaluationRunId", request.get("evaluationRunId").asText());
-        agentRun.put("agentRunId", request.get("agentRunId").asText());
-        agentRun.put("attemptId", Math.max(1, attemptId));
-        agentRun.put("agentType", "LOAN_DECISION_AGENT");
-        agentRun.put("requestIdempotencyKey", request.get("requestIdempotencyKey").asText());
-        agentRun.put("startedAt", now.toString());
-        agentRun.put("completedAt", now.toString());
-        agentRun.put("runtimeVersion", "governance-orchestrator");
-
-        Map<String, Object> failure = new LinkedHashMap<>();
-        failure.put("classification", classification);
-        failure.put("reasonCode", reasonCode);
-        failure.put("safeMessage", safeMessage);
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("schemaVersion", "1.0.0");
-        result.put("resultStatus", "FAILED");
-        result.put("agentRun", agentRun);
-        result.put("snapshotReference", request.get("snapshotReference"));
-        result.put("featureSchemaVersion", request.get("featureSchemaVersion").asText());
-        result.put("preprocessingVersion", request.get("preprocessingVersion").asText());
-        result.put("modelVersion", request.get("modelVersion").asText());
-        result.put("modelArtifactDigest", request.get("modelArtifactDigest").asText());
-        result.put("thresholdVersion", request.get("thresholdVersion").asText());
-        result.put("failure", failure);
-        result.put("completedAt", now.toString());
-        return json.toJsonNode(result).deepCopy();
     }
 
     private boolean isRetryableFailed(JsonNode result) {

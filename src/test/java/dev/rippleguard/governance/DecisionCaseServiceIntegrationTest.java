@@ -275,6 +275,29 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
+    void malformedRuntimeResultRecordsSchemaInvalidWithoutSyntheticAgentFailure() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000017");
+        agentClient.returnMalformedResult();
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.VERIFICATION_REQUIRED);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.FAILED);
+        assertThat(run.getFailureReasonCode()).isEqualTo("CONTRACT_VALIDATION_FAILED");
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsExactlyInAnyOrder(
+                        "governance.review.started.v1",
+                        "governance.agent-result.validated.v1"
+                );
+        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v1")))
+                .containsExactly("SCHEMA_INVALID");
+    }
+
+    @Test
     void rejectsSnapshotIdentityMismatchBeyondDigest() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000013");
         agentClient.overrideSnapshotField("snapshotId", "snapshot-other");
@@ -323,7 +346,9 @@ class DecisionCaseServiceIntegrationTest {
         EvaluationRunEntity blockedRun = evaluationRuns.findById(run.getEvaluationRunId()).orElseThrow();
         assertThat(blockedRun.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
         assertThat(blockedRun.getFailureReasonCode()).isEqualTo("AGENT_RUN_RESULT_CONFLICT");
-        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        var blockedResponse = service.getByApplication(applicationId);
+        assertThat(blockedResponse.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(blockedResponse.proposal()).isNull();
         assertThat(outbox.count()).isEqualTo(outboxCount);
     }
 
