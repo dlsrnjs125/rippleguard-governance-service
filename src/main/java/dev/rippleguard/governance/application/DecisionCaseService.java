@@ -89,15 +89,9 @@ public class DecisionCaseService {
         try {
             execution = transactions.execute(status -> planAgentExecution(event));
         } catch (DataIntegrityViolationException conflict) {
-            execution = recoverConcurrentDecisionCaseExecution(event);
-            if (execution == null) {
-                throw conflict;
-            }
+            execution = recoverPlanningConflict(event, conflict);
         } catch (OptimisticLockingFailureException conflict) {
-            execution = recoverConcurrentDecisionCaseExecution(event);
-            if (execution == null) {
-                throw conflict;
-            }
+            execution = recoverPlanningConflict(event, conflict);
         }
         if (execution == null || execution.alreadyProcessed()) {
             return;
@@ -523,6 +517,22 @@ public class DecisionCaseService {
                     })
                     .orElse(null);
         });
+    }
+
+    private AgentExecution recoverPlanningConflict(EventEnvelope event, RuntimeException original) {
+        RuntimeException latest = original;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                AgentExecution execution = recoverConcurrentDecisionCaseExecution(event);
+                if (execution != null) {
+                    return execution;
+                }
+                return AgentExecution.skipped();
+            } catch (DataIntegrityViolationException | OptimisticLockingFailureException retryable) {
+                latest = retryable;
+            }
+        }
+        throw latest;
     }
 
     private AgentExecution resumeDuplicateEvent(EventEnvelope event) {
