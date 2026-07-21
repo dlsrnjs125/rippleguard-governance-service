@@ -20,7 +20,6 @@ public interface EvaluationRunRepository extends JpaRepository<EvaluationRunEnti
             select run
             from EvaluationRunEntity run
             where run.status = dev.rippleguard.governance.domain.EvaluationRunStatus.RUNNING
-              and run.attemptCount < run.maxAttempts
               and (run.nextAttemptAt is null or run.nextAttemptAt <= :now)
               and (run.leaseUntil is null or run.leaseUntil < :now)
             order by run.createdAt

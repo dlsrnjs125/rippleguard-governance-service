@@ -39,8 +39,10 @@ rippleguard:
       model-artifact-digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
       threshold-version: threshold.v1.0.0
       max-attempts: 2
+      planning-recovery-attempts: 5
       request-timeout: 30s
       retry-backoff: 1s
+      planning-recovery-backoff: 1ms
       lease-duration: 30s
 
 management:

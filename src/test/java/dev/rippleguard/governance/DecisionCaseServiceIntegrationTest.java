@@ -162,6 +162,45 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
+    void schedulerFailsRunWhenFinalClaimedAttemptLeaseExpiresBeforeRuntimeCall() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000009");
+        EventEnvelope event = submitted(applicationId);
+        agentClient.timeoutNextCalls(1);
+
+        service.handleLoanApplicationSubmitted(event);
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.RUNNING);
+        assertThat(run.getAttemptCount()).isEqualTo(1);
+
+        jdbc.update(
+                """
+                update evaluation_run
+                set attempt_count = 2,
+                    next_attempt_at = ?,
+                    lease_until = ?
+                where evaluation_run_id = ?
+                """,
+                Timestamp.from(Instant.now().minusSeconds(5)),
+                Timestamp.from(Instant.now().minusSeconds(1)),
+                run.getEvaluationRunId()
+        );
+
+        service.resumePendingPhase2AgentRuns();
+
+        EvaluationRunEntity recoveredRun = evaluationRuns.findById(run.getEvaluationRunId()).orElseThrow();
+        assertThat(recoveredRun.getStatus()).isEqualTo(EvaluationRunStatus.FAILED);
+        assertThat(recoveredRun.getAttemptCount()).isEqualTo(2);
+        assertThat(recoveredRun.getFailureReasonCode()).isEqualTo("RETRY_EXHAUSTED");
+        assertThat(service.getByApplication(applicationId).status())
+                .isEqualTo(DecisionCaseStatus.VERIFICATION_REQUIRED);
+        assertThat(agentClient.calls()).isEqualTo(1);
+    }
+
+    @Test
     void mockEvaluationIsDeterministic() {
         MockDecisionEvaluator evaluator = new MockDecisionEvaluator();
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000003");

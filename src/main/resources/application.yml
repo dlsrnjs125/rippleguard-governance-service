@@ -69,6 +69,8 @@ rippleguard:
       model-artifact-digest: ${PHASE2_MODEL_ARTIFACT_DIGEST}
       threshold-version: ${PHASE2_THRESHOLD_VERSION}
       max-attempts: ${AGENT_RUNTIME_MAX_ATTEMPTS:2}
+      planning-recovery-attempts: ${PHASE2_PLANNING_RECOVERY_ATTEMPTS:5}
       request-timeout: ${AGENT_RUNTIME_REQUEST_TIMEOUT:30s}
       retry-backoff: ${AGENT_RUNTIME_RETRY_BACKOFF:2s}
+      planning-recovery-backoff: ${PHASE2_PLANNING_RECOVERY_BACKOFF:25ms}
       lease-duration: ${AGENT_RUNTIME_LEASE_DURATION:30s}

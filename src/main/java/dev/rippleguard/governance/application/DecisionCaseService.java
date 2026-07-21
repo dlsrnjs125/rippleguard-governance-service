@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.locks.LockSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -212,7 +213,13 @@ public class DecisionCaseService {
     }
 
     private void executeAgentRun(AgentExecution execution) {
-        AttemptLease attempt = transactions.execute(status -> claimNextAttempt(execution));
+        AttemptLease attempt;
+        try {
+            attempt = transactions.execute(status -> claimNextAttempt(execution));
+        } catch (OptimisticLockingFailureException conflict) {
+            log.debug("Run already claimed evaluationRunId={}", execution.evaluationRunId());
+            return;
+        }
         if (attempt == null) {
             return;
         }
@@ -521,18 +528,25 @@ public class DecisionCaseService {
 
     private AgentExecution recoverPlanningConflict(EventEnvelope event, RuntimeException original) {
         RuntimeException latest = original;
-        for (int attempt = 0; attempt < 5; attempt++) {
+        for (int attempt = 0; attempt < executionPlan.planningRecoveryAttempts(); attempt++) {
             try {
                 AgentExecution execution = recoverConcurrentDecisionCaseExecution(event);
                 if (execution != null) {
                     return execution;
                 }
-                return AgentExecution.skipped();
             } catch (DataIntegrityViolationException | OptimisticLockingFailureException retryable) {
                 latest = retryable;
             }
+            backoffPlanningRecovery(attempt);
         }
         throw latest;
+    }
+
+    private void backoffPlanningRecovery(int attempt) {
+        if (attempt >= executionPlan.planningRecoveryAttempts() - 1 || executionPlan.planningRecoveryBackoff().isZero()) {
+            return;
+        }
+        LockSupport.parkNanos(executionPlan.planningRecoveryBackoff().multipliedBy(attempt + 1L).toNanos());
     }
 
     private AgentExecution resumeDuplicateEvent(EventEnvelope event) {
