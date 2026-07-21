@@ -12,14 +12,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout contracts
+        uses: actions/checkout@v4
+        with:
+          repository: dlsrnjs125/rippleguard-contracts
+          ref: f4012e8b5a0dcd5605b61652a5c39deacb14454b
+          path: rippleguard-contracts
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
       - name: Test
         run: ./mvnw test
+        env:
+          CONTRACTS_ROOT: rippleguard-contracts
       - name: Package
         run: ./mvnw package
+        env:
+          CONTRACTS_ROOT: rippleguard-contracts
       - name: Docker build
         run: |
           image="rippleguard-governance-service:${GITHUB_SHA::12}"

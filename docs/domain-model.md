@@ -18,7 +18,7 @@ States:
 
 ## Evaluation Run
 
-`evaluation_run` stores the deterministic mock run in the Contracts v2.0.0 shape: execution plan version, component versions, policy input/bundle versions, supersedes run id, status, creation/completion times, proposal, confidence, and generated decision id.
+`evaluation_run` stores the Phase 2 Agent orchestration record: execution plan version, component versions, fixed `agentRunId`, request idempotency key, snapshot identity, source event id, model and preprocessing versions, attempt count, retry schedule, execution lease, deadline, accepted result digest, accepted proposal snapshot, validation outcome, and failure classification/reason when rejected.
 
 ## Inbox and Outbox
 

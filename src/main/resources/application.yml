@@ -39,8 +39,9 @@ management:
 rippleguard:
   contracts:
     repository: dlsrnjs125/rippleguard-contracts
-    commit: 29f6c348fd93633476438ee36b3f93a3d036e165
+    commit: f4012e8
     event-schema-version: 1.1.0
+    root: ${CONTRACTS_ROOT}
   loan:
     repository: dlsrnjs125/rippleguard-loan-service
     commit: 54ea344a682723d61d9beedf4ade56ee48029c0d
@@ -52,3 +53,24 @@ rippleguard:
     batch-size: ${OUTBOX_BATCH_SIZE:50}
     lease-seconds: ${OUTBOX_LEASE_SECONDS:60}
     instance-id: ${OUTBOX_INSTANCE_ID:${HOSTNAME:governance-service-local}}
+  agent-runtime:
+    enabled: ${AGENT_RUNTIME_ENABLED:true}
+    base-url: ${AGENT_RUNTIME_BASE_URL}
+    loan-decision-runs-path: ${AGENT_RUNTIME_LOAN_DECISION_RUNS_PATH:/internal/v1/loan-decision-agent/runs}
+    connect-timeout: ${AGENT_RUNTIME_CONNECT_TIMEOUT:2s}
+    response-timeout: ${AGENT_RUNTIME_RESPONSE_TIMEOUT:10s}
+    max-response-bytes: ${AGENT_RUNTIME_MAX_RESPONSE_BYTES:1048576}
+  phase2:
+    execution-plan:
+      plan-version: ${PHASE2_EXECUTION_PLAN_VERSION}
+      feature-schema-version: ${PHASE2_FEATURE_SCHEMA_VERSION}
+      preprocessing-version: ${PHASE2_PREPROCESSING_VERSION}
+      model-version: ${PHASE2_MODEL_VERSION}
+      model-artifact-digest: ${PHASE2_MODEL_ARTIFACT_DIGEST}
+      threshold-version: ${PHASE2_THRESHOLD_VERSION}
+      max-attempts: ${AGENT_RUNTIME_MAX_ATTEMPTS:2}
+      planning-recovery-attempts: ${PHASE2_PLANNING_RECOVERY_ATTEMPTS:5}
+      request-timeout: ${AGENT_RUNTIME_REQUEST_TIMEOUT:30s}
+      retry-backoff: ${AGENT_RUNTIME_RETRY_BACKOFF:2s}
+      planning-recovery-backoff: ${PHASE2_PLANNING_RECOVERY_BACKOFF:25ms}
+      lease-duration: ${AGENT_RUNTIME_LEASE_DURATION:30s}

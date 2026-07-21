@@ -5,9 +5,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
-import org.springframework.stereotype.Component;
 
-@Component
 public class MockDecisionEvaluator {
     public static final String RULE_VERSION = "phase1-mock-v1";
     public static final String EVALUATOR_ID = "mock-evaluator";

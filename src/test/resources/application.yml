@@ -12,12 +12,38 @@ spring:
     bootstrap-servers: localhost:9092
 
 rippleguard:
+  contracts:
+    repository: dlsrnjs125/rippleguard-contracts
+    commit: f4012e8
+    event-schema-version: 1.1.0
+    root: ${CONTRACTS_ROOT:../rippleguard-contracts}
   kafka:
     enabled: false
   outbox:
     batch-size: 10
     lease-seconds: 60
     instance-id: test-instance
+  agent-runtime:
+    enabled: true
+    base-url: http://agent-runtime.test
+    loan-decision-runs-path: /internal/v1/loan-decision-agent/runs
+    connect-timeout: 1s
+    response-timeout: 2s
+    max-response-bytes: 1048576
+  phase2:
+    execution-plan:
+      plan-version: phase2-loan-agent.v1
+      feature-schema-version: phase-2-loan-features.v1.0.0
+      preprocessing-version: preprocess.v1.0.0
+      model-version: loan-model.v1.0.0
+      model-artifact-digest: sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+      threshold-version: threshold.v1.0.0
+      max-attempts: 2
+      planning-recovery-attempts: 5
+      request-timeout: 30s
+      retry-backoff: 1s
+      planning-recovery-backoff: 1ms
+      lease-duration: 30s
 
 management:
   health:

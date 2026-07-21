@@ -1,11 +1,10 @@
 # RippleGuard Governance Service
 
-Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state, consumes Loan application submissions, runs deterministic mock evaluation/assurance, and emits command events through a transactional outbox.
+Governance Core service. It owns Decision Case and Evaluation Run state, consumes Loan application submissions, orchestrates the Phase 2 Loan Decision Agent Runtime, validates Agent results against Contracts, and emits Governance validation audit events through a transactional outbox.
 
 ## Baselines
 
-- Contracts: `dlsrnjs125/rippleguard-contracts@29f6c348fd93633476438ee36b3f93a3d036e165`
-- Loan Service: `dlsrnjs125/rippleguard-loan-service@54ea344a682723d61d9beedf4ade56ee48029c0d`
+- Contracts: `dlsrnjs125/rippleguard-contracts@f4012e8`
 
 ## API
 
@@ -15,9 +14,9 @@ Phase 1 Governance Core service. It owns Decision Case and Evaluation Run state,
 ## Events
 
 - Consumes: `loan.application.submitted.v1`
-- Publishes: `governance.review.started.v1`, `agent.evaluation.requested.v1`, `agent.evaluation.completed.v1`, `loan.decision.commanded.v1`
+- Publishes: `governance.review.started.v1`, `governance.agent-result.validated.v1`
 
-Published Governance events use strictly increasing transaction-local occurrence timestamps so Audit can reconstruct the causation order without Infra or Audit-side rewrites.
+Phase 2 does not emit `loan.decision.commanded.v1` from Agent proposals. Final Loan state changes remain outside this service path.
 
 ## Environment
 
@@ -26,6 +25,13 @@ Published Governance events use strictly increasing transaction-local occurrence
 - `GOVERNANCE_KAFKA_ENABLED`
 - `TOPIC_LOAN_APPLICATION_SUBMITTED`
 - `OUTBOX_BATCH_SIZE`, `OUTBOX_LEASE_SECONDS`, `OUTBOX_INSTANCE_ID`
+- `CONTRACTS_ROOT`
+- `AGENT_RUNTIME_ENABLED`, `AGENT_RUNTIME_BASE_URL`
+- `AGENT_RUNTIME_CONNECT_TIMEOUT`, `AGENT_RUNTIME_RESPONSE_TIMEOUT`
+- `AGENT_RUNTIME_MAX_ATTEMPTS`, `AGENT_RUNTIME_REQUEST_TIMEOUT`
+- `PHASE2_EXECUTION_PLAN_VERSION`
+- `PHASE2_FEATURE_SCHEMA_VERSION`, `PHASE2_PREPROCESSING_VERSION`
+- `PHASE2_MODEL_VERSION`, `PHASE2_MODEL_ARTIFACT_DIGEST`, `PHASE2_THRESHOLD_VERSION`
 
 ## Run
 
@@ -46,13 +52,14 @@ merged, build the final Governance Service image from the new `main` merge
 commit in this repository. RippleGuard Infra records and verifies the immutable
 image baseline; Infra does not own the Governance image build.
 
-Mock evaluation is deterministic and not a real financial credit policy. Phase 1 executes mock requested/completed/assurance inside the service transaction for trace contract coverage; Agent Runtime integration is deferred.
+Phase 1 mock evaluation remains documented as historical context only. The production Phase 2 path does not fall back to mock evaluation, prior proposals, default models, or automatic Loan decision commands.
 
 ## Docs
 
 - [Architecture](docs/architecture.md)
 - [Domain Model](docs/domain-model.md)
 - [Mock Evaluation](docs/mock-evaluation.md)
+- [Phase 2 Agent Orchestration](docs/phase-2-agent-orchestration.md)
 - [Event Flow](docs/event-flow.md)
 - [Testing](docs/testing.md)
 - [Troubleshooting](docs/troubleshooting.md)

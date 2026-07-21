@@ -4,15 +4,15 @@
 2. Validate schema version, producer, application id, correlation id, and snapshot reference.
 3. Create `DecisionCase`.
 4. Write `governance.review.started.v1` to outbox.
-5. Create `EvaluationRun`.
-6. Write `agent.evaluation.requested.v1` to outbox.
-7. Complete deterministic mock evaluation.
-8. Write `agent.evaluation.completed.v1` to outbox.
-9. Complete mock assurance.
-10. Evaluate mock assurance.
-11. If assurance is complete, write `loan.decision.commanded.v1` to outbox and resolve the case.
-12. If assurance is incomplete or violated, move to `VERIFICATION_REQUIRED` or `BLOCKED` and do not emit a decision command.
+5. Create `EvaluationRun` with fixed `agentRunId`, request idempotency key, snapshot identity, model version, artifact digest, preprocessing version, threshold version, attempts, retry metadata, lease metadata, and deadline.
+6. Validate the Agent Request against Contracts.
+7. Record the attempt and execution lease in the DB, then call Loan Decision Agent Runtime outside the DB transaction.
+8. Validate the Agent Result against Contracts and immutable request identity.
+9. If validation passes for a completed result, store the accepted proposal snapshot, move the case to `PROPOSAL_READY`, and write `governance.agent-result.validated.v1` with `VALIDATED`.
+10. If validation fails or the Agent returns a failed result, move the case to `VERIFICATION_REQUIRED` or `BLOCKED` and write `governance.agent-result.validated.v1` with `REJECTED`.
 
-Kafka publish failure leaves rows in the outbox for retry. DB failure prevents inbox completion. Unknown schema versions are quarantined and are not treated as completed inbox records.
+Kafka publish failure leaves rows in the outbox for retry. Unknown schema versions are quarantined and are not treated as completed inbox records. If the inbox row is committed but the external Agent Runtime call does not complete, duplicate event delivery and the scheduled recovery loop resume the existing `RUNNING` Evaluation Run instead of treating the inbox row as complete business processing.
 
-Within one submitted-event transaction, Governance assigns strictly increasing occurrence and outbox timestamps to `governance.review.started.v1`, `agent.evaluation.requested.v1`, `agent.evaluation.completed.v1`, and `loan.decision.commanded.v1`. This timestamp sequence expresses logical causation order inside the transaction; it is not intended to be a system-wide clock accuracy guarantee.
+Governance does not publish `agent.evaluation.completed.v1` or `loan.decision.commanded.v1` in the Phase 2 Agent orchestration path.
+
+Governance currently emits contract-valid `IMMUTABLE_REFERENCE` Agent Requests. Actual Phase 2 E2E remains blocked until Loan materialized feature payloads are available to Governance or Agent Runtime can resolve immutable snapshot references itself.

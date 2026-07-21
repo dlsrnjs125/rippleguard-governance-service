@@ -1,9 +1,7 @@
 package dev.rippleguard.governance.application;
 
 import dev.rippleguard.governance.domain.AssuranceResult;
-import org.springframework.stereotype.Component;
 
-@Component
 public class MockAssuranceEvaluator {
     public MockAssuranceResult evaluate(LoanApplicationSubmittedPayload payload, MockEvaluationResult proposal) {
         if (payload.inputSnapshotVersion() == null || payload.inputSnapshotVersion().isBlank()) {

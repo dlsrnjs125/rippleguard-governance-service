@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -39,8 +40,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest(properties = {
         "debug=false",
         "rippleguard.kafka.enabled=false",
-        "management.health.kafka.enabled=false"
+        "management.health.kafka.enabled=false",
+        "AGENT_RUNTIME_RECOVERY_DELAY_MS=600000"
 })
+@Import(Phase2AgentClientTestConfiguration.class)
 class PostgresMigrationIntegrationTest {
     @Container
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")
@@ -131,9 +134,7 @@ class PostgresMigrationIntegrationTest {
         assertThat(claimed).extracting(OutboxEventEntity::getEventType)
                 .containsExactly(
                         "governance.review.started.v1",
-                        "agent.evaluation.requested.v1",
-                        "agent.evaluation.completed.v1",
-                        "loan.decision.commanded.v1"
+                        "governance.agent-result.validated.v1"
                 );
     }
 
@@ -154,9 +155,9 @@ class PostgresMigrationIntegrationTest {
         );
 
         assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
-        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.RESOLVED);
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(2);
     }
 
     @Test
@@ -189,9 +190,9 @@ class PostgresMigrationIntegrationTest {
         );
 
         assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
-        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.RESOLVED);
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(2);
         assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(2);
     }
 

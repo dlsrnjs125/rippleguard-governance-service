@@ -131,7 +131,9 @@ public class DecisionCaseEntity {
             case ASSURANCE_EVALUATED -> target == DecisionCaseStatus.RESOLVED
                     || target == DecisionCaseStatus.BLOCKED
                     || target == DecisionCaseStatus.RECALCULATION_REQUIRED;
-            case VERIFICATION_REQUIRED, BLOCKED, RESOLVED, RECALCULATION_REQUIRED ->
+            case VERIFICATION_REQUIRED -> target == DecisionCaseStatus.BLOCKED
+                    || target == DecisionCaseStatus.RECALCULATION_REQUIRED;
+            case BLOCKED, RESOLVED, RECALCULATION_REQUIRED ->
                     target == DecisionCaseStatus.RECALCULATION_REQUIRED;
         };
     }

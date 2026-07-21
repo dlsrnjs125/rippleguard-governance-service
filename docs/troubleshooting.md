@@ -8,6 +8,12 @@ Check schema version, producer, application id, and correlation id. Unknown cont
 
 `inputSnapshotVersion` is required for evaluation. If the envelope and core business identifiers are valid but the snapshot reference is missing, Governance creates a case in `VERIFICATION_REQUIRED`, records reason `SNAPSHOT_REFERENCE_MISSING`, and records the inbox event to stop endless Kafka retry.
 
+## RUNNING Evaluation After Process Restart
+
+If Governance crashes after committing the inbox row but before completing the Agent Runtime call, the Evaluation Run remains `RUNNING`. The same Kafka event can be redelivered safely: Governance checks the existing case payload hash and resumes the latest `RUNNING` Evaluation Run instead of skipping solely because the inbox row exists.
+
+The scheduled recovery path also scans `RUNNING` Evaluation Runs whose lease expired and whose `next_attempt_at` has arrived. Each external attempt is recorded before the HTTP call. Transport timeout or connection failure updates retry metadata and does not create a synthetic Agent Runtime result.
+
 ## Outbox Event Remains Pending
 
 Kafka publish failure does not roll back the domain transaction. The event remains retryable in `outbox_event`.
