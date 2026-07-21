@@ -21,9 +21,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 @SpringBootTest(properties = "debug=false")
+@Import(Phase2AgentClientTestConfiguration.class)
 class DecisionCaseServiceIntegrationTest {
     @Autowired
     DecisionCaseService service;
@@ -56,45 +58,37 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
-    void submittedEventCreatesCaseEvaluationAndDecisionCommandOutbox() {
+    void submittedEventCreatesCaseEvaluationAndAgentValidationOutbox() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000001");
         EventEnvelope submitted = submitted(applicationId);
         service.handleLoanApplicationSubmitted(submitted);
 
         var response = service.getByApplication(applicationId);
 
-        assertThat(response.status()).isEqualTo(DecisionCaseStatus.RESOLVED);
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(response.evaluationRunId()).isNotNull();
         assertThat(response.evaluationRunStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
-        assertThat(response.finalDecision()).isNotNull();
+        assertThat(response.finalDecision()).isNull();
         assertThat(decisionCases.findByApplicationId(applicationId)).isPresent();
         assertThat(evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())).isPresent();
         assertThat(outbox.findAll()).extracting("eventType")
                 .containsExactlyInAnyOrder(
                         "governance.review.started.v1",
-                        "agent.evaluation.requested.v1",
-                        "agent.evaluation.completed.v1",
-                        "loan.decision.commanded.v1"
+                        "governance.agent-result.validated.v1"
                 );
 
         List<OutboxRow> rows = outboxRowsByCreatedAt();
         assertThat(rows).extracting(OutboxRow::eventType)
                 .containsExactly(
                         "governance.review.started.v1",
-                        "agent.evaluation.requested.v1",
-                        "agent.evaluation.completed.v1",
-                        "loan.decision.commanded.v1"
+                        "governance.agent-result.validated.v1"
                 );
         assertThat(rows.get(0).createdAt()).isBefore(rows.get(1).createdAt());
-        assertThat(rows.get(1).createdAt()).isBefore(rows.get(2).createdAt());
-        assertThat(rows.get(2).createdAt()).isBefore(rows.get(3).createdAt());
 
         List<Instant> occurredAt = rows.stream()
                 .map(row -> occurredAt(row.payload()))
                 .toList();
         assertThat(occurredAt.get(0)).isBefore(occurredAt.get(1));
-        assertThat(occurredAt.get(1)).isBefore(occurredAt.get(2));
-        assertThat(occurredAt.get(2)).isBefore(occurredAt.get(3));
 
         Map<String, UUID> eventIdsByType = rows.stream()
                 .collect(java.util.stream.Collectors.toMap(
@@ -103,12 +97,8 @@ class DecisionCaseServiceIntegrationTest {
                 ));
         assertThat(causationId(payloadFor(rows, "governance.review.started.v1")))
                 .isEqualTo(submitted.eventId());
-        assertThat(causationId(payloadFor(rows, "agent.evaluation.requested.v1")))
-                .isEqualTo(submitted.eventId());
-        assertThat(causationId(payloadFor(rows, "agent.evaluation.completed.v1")))
-                .isEqualTo(eventIdsByType.get("agent.evaluation.requested.v1"));
-        assertThat(causationId(payloadFor(rows, "loan.decision.commanded.v1")))
-                .isEqualTo(eventIdsByType.get("agent.evaluation.completed.v1"));
+        assertThat(causationId(payloadFor(rows, "governance.agent-result.validated.v1")))
+                .isNotNull();
     }
 
     @Test
@@ -119,7 +109,7 @@ class DecisionCaseServiceIntegrationTest {
         service.handleLoanApplicationSubmitted(event);
 
         assertThat(decisionCases.count()).isEqualTo(1);
-        assertThat(outbox.count()).isEqualTo(4);
+        assertThat(outbox.count()).isEqualTo(2);
     }
 
     @Test
@@ -176,13 +166,13 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
-    void blockedSnapshotCreatesBlockedCaseAndNoDecisionCommand() {
+    void phase2DoesNotUseSnapshotNameToForceMockBlockedDecision() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000006");
 
         service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v-blocked-001"));
 
         var response = service.getByApplication(applicationId);
-        assertThat(response.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(outbox.findAll()).extracting("eventType")
                 .doesNotContain("loan.decision.commanded.v1");
     }

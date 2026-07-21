@@ -2,7 +2,9 @@ package dev.rippleguard.governance.application;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -12,15 +14,19 @@ import org.springframework.stereotype.Component;
 @Component
 public class JsonSupport {
     private final ObjectMapper objectMapper;
+    private final ObjectMapper canonicalObjectMapper;
 
     public JsonSupport(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.canonicalObjectMapper = objectMapper.copy()
+                .configure(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY, true)
+                .configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true);
     }
 
     public String canonicalJson(Object value) {
         try {
-            JsonNode tree = objectMapper.valueToTree(value);
-            return objectMapper.writeValueAsString(tree);
+            JsonNode tree = canonicalObjectMapper.valueToTree(value);
+            return canonicalObjectMapper.writeValueAsString(tree);
         } catch (JsonProcessingException exception) {
             throw new IllegalArgumentException("Unable to serialize JSON", exception);
         }
@@ -33,6 +39,14 @@ public class JsonSupport {
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is unavailable", exception);
         }
+    }
+
+    public String sha256Prefixed(String value) {
+        return "sha256:" + sha256(value);
+    }
+
+    public JsonNode toJsonNode(Object value) {
+        return objectMapper.valueToTree(value);
     }
 
     public <T> T fromJson(String json, Class<T> type) {

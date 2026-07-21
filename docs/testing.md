@@ -4,11 +4,11 @@ Coverage includes:
 
 - submitted event creates case, evaluation run, and decision command outbox
 - duplicate submitted event idempotency
-- deterministic mock reproducibility
+- Phase 2 Agent Request and Agent Result contract validation
 - state transition coverage
 - unsupported schema rejection
 - missing snapshot reference to `VERIFICATION_REQUIRED`
-- mock assurance violated to `BLOCKED`
+- Agent result mismatch or blocked failure to `BLOCKED`
 - conflicting submitted event to `RECALCULATION_REQUIRED`
 - unsupported version quarantine
 - PostgreSQL Flyway validation
