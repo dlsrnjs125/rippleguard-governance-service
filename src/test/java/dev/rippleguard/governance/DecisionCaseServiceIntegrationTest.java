@@ -258,6 +258,47 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
+    void retryableFailedResultWithFutureAttemptIsBlockedBeforeRetryScheduling() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000018");
+        agentClient.returnRetryableFailure();
+        agentClient.overrideAttemptId(2);
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
+        assertThat(run.getFailureReasonCode()).isEqualTo("AGENT_ATTEMPT_MISMATCH");
+        assertThat(run.getAttemptCount()).isEqualTo(1);
+        assertThat(run.getLastTransportFailureCode()).isNull();
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsOnly("governance.review.started.v1");
+    }
+
+    @Test
+    void retryableFailedResultWithSnapshotMismatchIsBlockedBeforeRetryScheduling() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000019");
+        agentClient.returnRetryableFailure();
+        agentClient.overrideSnapshotField("snapshotDigest",
+                "sha256:9999999999999999999999999999999999999999999999999999999999999999");
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
+        assertThat(run.getFailureReasonCode()).isEqualTo("SNAPSHOT_IDENTITY_MISMATCH");
+        assertThat(run.getAttemptCount()).isEqualTo(1);
+        assertThat(run.getLastTransportFailureCode()).isNull();
+    }
+
+    @Test
     void rejectsCompletedResultAfterEvaluationDeadline() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000012");
         agentClient.completeAfterDeadline(30);

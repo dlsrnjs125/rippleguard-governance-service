@@ -31,6 +31,7 @@ public class Phase2AgentClientTestConfiguration {
         private volatile String snapshotFieldOverride;
         private volatile String snapshotValueOverride;
         private volatile boolean malformedResult;
+        private volatile boolean retryableFailure;
 
         RecordingLoanDecisionAgentClient(ObjectMapper objectMapper) {
             this.objectMapper = objectMapper;
@@ -74,7 +75,7 @@ public class Phase2AgentClientTestConfiguration {
 
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("schemaVersion", "1.0.0");
-            result.put("resultStatus", "COMPLETED");
+            result.put("resultStatus", retryableFailure ? "FAILED" : "COMPLETED");
             result.put("agentRun", agentRun);
             result.put("snapshotReference", request.get("snapshotReference"));
             result.put("featureSchemaVersion", request.get("featureSchemaVersion").asText());
@@ -82,10 +83,18 @@ public class Phase2AgentClientTestConfiguration {
             result.put("modelVersion", request.get("modelVersion").asText());
             result.put("modelArtifactDigest", request.get("modelArtifactDigest").asText());
             result.put("thresholdVersion", request.get("thresholdVersion").asText());
-            result.put("proposal", proposal);
-            result.put("explanationRef", "shap://loan-agent/test/attempt-1");
-            result.put("explanationDigest", "sha256:2222222222222222222222222222222222222222222222222222222222222222");
-            result.put("evidenceRefs", List.of(request.get("snapshotReference").get("snapshotReference").asText()));
+            if (retryableFailure) {
+                result.put("failure", Map.of(
+                        "classification", "RETRYABLE",
+                        "reasonCode", "AGENT_TIMEOUT",
+                        "safeMessage", "Agent attempt timed out before deadline."
+                ));
+            } else {
+                result.put("proposal", proposal);
+                result.put("explanationRef", "shap://loan-agent/test/attempt-1");
+                result.put("explanationDigest", "sha256:2222222222222222222222222222222222222222222222222222222222222222");
+                result.put("evidenceRefs", List.of(request.get("snapshotReference").get("snapshotReference").asText()));
+            }
             result.put("completedAt", completedAt);
             ObjectNode node = objectMapper.valueToTree(result);
             if (snapshotFieldOverride != null) {
@@ -116,6 +125,7 @@ public class Phase2AgentClientTestConfiguration {
             snapshotFieldOverride = null;
             snapshotValueOverride = null;
             malformedResult = false;
+            retryableFailure = false;
         }
 
         void timeoutNextCalls(int count) {
@@ -140,6 +150,10 @@ public class Phase2AgentClientTestConfiguration {
 
         void returnMalformedResult() {
             malformedResult = true;
+        }
+
+        void returnRetryableFailure() {
+            retryableFailure = true;
         }
     }
 }

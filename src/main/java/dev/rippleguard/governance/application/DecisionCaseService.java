@@ -241,6 +241,12 @@ public class DecisionCaseService {
                 return;
             }
             int attemptId = result.path("agentRun").path("attemptId").asInt(attempt.attemptId());
+            boolean retryableIdentityAccepted = Boolean.TRUE.equals(transactions.execute(status ->
+                    retryableResultIdentityAccepted(execution, result, attempt.attemptId())));
+            if (!retryableIdentityAccepted) {
+                transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result, attempt.attemptId()));
+                return;
+            }
             if (isRetryableFailed(result) && attemptId < executionPlan.maxAttempts()) {
                 transactions.executeWithoutResult(status -> recordAgentRetryableFailure(execution, attemptId, result));
                 return;
@@ -295,7 +301,6 @@ public class DecisionCaseService {
                     run.getEvaluationRunId(), run.getStatus());
             return;
         }
-        run.recordAttempt(attemptId);
         boolean completed = "COMPLETED".equals(result.path("resultStatus").asText());
         Instant completedAt = parseInstant(result.path("completedAt").asText());
         if (!isAcceptedRuntimeAttempt(attemptId, claimedAttemptId)) {
@@ -303,6 +308,7 @@ public class DecisionCaseService {
             decisionCase.markBlocked("AGENT_ATTEMPT_MISMATCH", "AGENT_RESULT_REJECTED", completedAt);
             return;
         }
+        run.recordAttempt(attemptId);
         if (completed && completedAt.isAfter(run.getDeadlineAt())) {
             run.rejectPhase2("VALIDATION_REQUIRED", "DEADLINE_EXCEEDED", resultDigest, completedAt);
             decisionCase.markVerificationRequired("DEADLINE_EXCEEDED", "AGENT_RESULT_REJECTED", completedAt);
@@ -479,6 +485,18 @@ public class DecisionCaseService {
     private boolean isRetryableFailed(JsonNode result) {
         return "FAILED".equals(result.path("resultStatus").asText())
                 && "RETRYABLE".equals(result.path("failure").path("classification").asText());
+    }
+
+    private boolean retryableResultIdentityAccepted(AgentExecution execution, JsonNode result, int claimedAttemptId) {
+        if (!isRetryableFailed(result)) {
+            return true;
+        }
+        EvaluationRunEntity run = evaluationRuns.findById(execution.evaluationRunId()).orElseThrow();
+        int attemptId = result.path("agentRun").path("attemptId").asInt(claimedAttemptId);
+        List<String> reasonCodes = validateResultSemantics(run, result);
+        return isAcceptedRuntimeAttempt(attemptId, claimedAttemptId)
+                && reasonCodes.contains("MODEL_PROVENANCE_VALID")
+                && reasonCodes.contains("SNAPSHOT_MATCHED");
     }
 
     private String requestIdempotencyKey(String decisionCaseId, UUID evaluationRunId, String snapshotVersion, String payloadHash) {
