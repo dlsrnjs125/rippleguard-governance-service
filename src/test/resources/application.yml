@@ -16,7 +16,7 @@ rippleguard:
     repository: dlsrnjs125/rippleguard-contracts
     commit: f4012e8
     event-schema-version: 1.1.0
-    root: ../rippleguard-contracts
+    root: ${CONTRACTS_ROOT:../rippleguard-contracts}
   kafka:
     enabled: false
   outbox:

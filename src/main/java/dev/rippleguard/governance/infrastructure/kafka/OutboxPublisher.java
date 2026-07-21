@@ -9,7 +9,7 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.KafkaOperations;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -20,13 +20,13 @@ public class OutboxPublisher {
     private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
 
     private final OutboxEventRepository outbox;
-    private final KafkaTemplate<String, String> kafka;
+    private final KafkaOperations<String, String> kafka;
     private final Clock clock;
     private final TransactionTemplate transactions;
     private final OutboxProperties properties;
 
     public OutboxPublisher(OutboxEventRepository outbox,
-                           KafkaTemplate<String, String> kafka,
+                           KafkaOperations<String, String> kafka,
                            Clock clock,
                            TransactionTemplate transactions,
                            OutboxProperties properties) {
