@@ -237,7 +237,7 @@ public class DecisionCaseService {
                 transactions.executeWithoutResult(status -> recordAgentRetryableFailure(execution, attemptId, result));
                 return;
             }
-            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result));
+            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result, attempt.attemptId()));
         } catch (AgentRuntimeTimeoutException exception) {
             transactions.executeWithoutResult(status -> recordTransportFailure(
                     execution, attempt.attemptId(), "AGENT_TIMEOUT", false));
@@ -248,21 +248,47 @@ public class DecisionCaseService {
             JsonNode result = failedResult(execution.request(), attempt.attemptId(),
                     "VALIDATION_REQUIRED", "CONTRACT_VALIDATION_FAILED",
                     "Agent Runtime result failed official contract validation.");
-            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result));
+            transactions.executeWithoutResult(status -> validateAndRecordResult(execution, result, attempt.attemptId()));
         } catch (OptimisticLockingFailureException conflict) {
             log.info("Skipped stale Phase 2 agent result evaluationRunId={}", execution.evaluationRunId());
         }
     }
 
-    private void validateAndRecordResult(AgentExecution execution, JsonNode result) {
+    private void validateAndRecordResult(AgentExecution execution, JsonNode result, int claimedAttemptId) {
         EvaluationRunEntity run = evaluationRuns.findById(execution.evaluationRunId()).orElseThrow();
         DecisionCaseEntity decisionCase = decisionCases.findById(execution.caseId()).orElseThrow();
         int attemptId = result.path("agentRun").path("attemptId").asInt(1);
-        run.recordAttempt(attemptId);
         String resultDigest = json.sha256Prefixed(json.canonicalJson(result));
-        List<String> reasonCodes = validateResultSemantics(run, result);
+        if (run.getAcceptedResultDigest() != null) {
+            if (run.getAcceptedResultDigest().equals(resultDigest)) {
+                log.info("Ignored duplicate Phase 2 agent result evaluationRunId={} digest={}",
+                        run.getEvaluationRunId(), resultDigest);
+                return;
+            }
+            Instant conflictAt = clock.instant();
+            run.blockResultConflict("AGENT_RUN_RESULT_CONFLICT", conflictAt);
+            decisionCase.markBlocked("AGENT_RUN_RESULT_CONFLICT", "AGENT_RESULT_CONFLICT", conflictAt);
+            return;
+        }
+        if (run.getStatus() != EvaluationRunStatus.RUNNING) {
+            log.info("Ignored stale Phase 2 agent result evaluationRunId={} status={}",
+                    run.getEvaluationRunId(), run.getStatus());
+            return;
+        }
+        run.recordAttempt(attemptId);
         boolean completed = "COMPLETED".equals(result.path("resultStatus").asText());
         Instant completedAt = parseInstant(result.path("completedAt").asText());
+        if (!isAcceptedRuntimeAttempt(attemptId, claimedAttemptId)) {
+            run.rejectPhase2("BLOCKED", "AGENT_ATTEMPT_MISMATCH", resultDigest, completedAt);
+            decisionCase.markBlocked("AGENT_ATTEMPT_MISMATCH", "AGENT_RESULT_REJECTED", completedAt);
+            return;
+        }
+        if (completed && completedAt.isAfter(run.getDeadlineAt())) {
+            run.rejectPhase2("VALIDATION_REQUIRED", "DEADLINE_EXCEEDED", resultDigest, completedAt);
+            decisionCase.markVerificationRequired("DEADLINE_EXCEEDED", "AGENT_RESULT_REJECTED", completedAt);
+            return;
+        }
+        List<String> reasonCodes = validateResultSemantics(run, result);
         if (decisionCase.getStatus() == DecisionCaseStatus.RECALCULATION_REQUIRED) {
             run.failOrchestration("VALIDATION_REQUIRED", "SUPERSEDED_BY_CONFLICTING_INPUT", completedAt);
             return;
@@ -365,7 +391,7 @@ public class DecisionCaseService {
                 || !run.getRequestIdempotencyKey().equals(agentRun.path("requestIdempotencyKey").asText())) {
             reasons.add("MODEL_PROVENANCE_INVALID");
         }
-        if (result.path("snapshotReference").path("snapshotDigest").asText("").equals(run.getSnapshotDigest())) {
+        if (snapshotIdentityMatches(run, result.path("snapshotReference"))) {
             reasons.add("SNAPSHOT_MATCHED");
         } else {
             reasons.add("SNAPSHOT_MISMATCH");
@@ -382,6 +408,20 @@ public class DecisionCaseService {
             reasons.add("AGENT_FAILURE_RECORDED");
         }
         return reasons.stream().distinct().toList();
+    }
+
+    private boolean isAcceptedRuntimeAttempt(int resultAttemptId, int claimedAttemptId) {
+        return resultAttemptId >= 1 && resultAttemptId <= claimedAttemptId;
+    }
+
+    private boolean snapshotIdentityMatches(EvaluationRunEntity run, JsonNode snapshot) {
+        return matchesText(snapshot, "snapshotId", run.getSnapshotId())
+                && matchesText(snapshot, "snapshotVersion", run.getInputSnapshotVersion())
+                && matchesText(snapshot, "snapshotSchemaVersion", run.getSnapshotSchemaVersion())
+                && matchesText(snapshot, "snapshotCreatedAt", run.getSnapshotCreatedAt().toString())
+                && matchesText(snapshot, "snapshotDigest", run.getSnapshotDigest())
+                && matchesText(snapshot, "snapshotReference", run.getSnapshotReference())
+                && matchesText(snapshot, "referenceType", run.getReferenceType());
     }
 
     private ObjectNode buildAgentRequest(DecisionCaseEntity decisionCase, EvaluationRunEntity run) {
@@ -490,7 +530,7 @@ public class DecisionCaseService {
             return "MODEL_ARTIFACT_DIGEST_MISMATCH";
         }
         if (reasonCodes.contains("SNAPSHOT_MISMATCH")) {
-            return "SNAPSHOT_DIGEST_MISMATCH";
+            return "SNAPSHOT_IDENTITY_MISMATCH";
         }
         if (reasonCodes.contains("SHAP_MISSING")) {
             return "SHAP_CALCULATION_FAILED";

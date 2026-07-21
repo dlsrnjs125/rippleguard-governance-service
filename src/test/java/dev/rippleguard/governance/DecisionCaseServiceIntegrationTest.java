@@ -1,7 +1,9 @@
 package dev.rippleguard.governance;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.rippleguard.governance.application.DecisionCaseService;
 import dev.rippleguard.governance.application.EventEnvelope;
 import dev.rippleguard.governance.application.MockDecisionEvaluator;
@@ -15,6 +17,7 @@ import dev.rippleguard.governance.infrastructure.persistence.OutboxEventReposito
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -24,6 +27,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest(properties = {
         "debug=false",
@@ -54,6 +59,9 @@ class DecisionCaseServiceIntegrationTest {
 
     @Autowired
     Phase2AgentClientTestConfiguration.RecordingLoanDecisionAgentClient agentClient;
+
+    @Autowired
+    TransactionTemplate transactions;
 
     @BeforeEach
     void cleanDatabase() {
@@ -201,6 +209,125 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
+    void cachedEarlierRuntimeAttemptCanSatisfyClaimedRetryAttempt() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000010");
+        EventEnvelope event = submitted(applicationId);
+        agentClient.timeoutNextCalls(1);
+
+        service.handleLoanApplicationSubmitted(event);
+
+        var firstResponse = service.getByApplication(applicationId);
+        EvaluationRunEntity pendingRun = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(firstResponse.caseId())
+                .orElseThrow();
+        jdbc.update(
+                "update evaluation_run set next_attempt_at = ?, lease_until = null where evaluation_run_id = ?",
+                Timestamp.from(Instant.now().minusSeconds(1)),
+                pendingRun.getEvaluationRunId()
+        );
+
+        service.handleLoanApplicationSubmitted(event);
+
+        var recoveredResponse = service.getByApplication(applicationId);
+        EvaluationRunEntity completedRun = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(recoveredResponse.caseId())
+                .orElseThrow();
+        assertThat(completedRun.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
+        assertThat(completedRun.getAttemptCount()).isEqualTo(2);
+        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v1")))
+                .containsExactly("SCHEMA_VALID", "MODEL_PROVENANCE_VALID", "SNAPSHOT_MATCHED", "SHAP_PRESENT");
+    }
+
+    @Test
+    void rejectsRuntimeAttemptBeyondClaimedAttempt() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000011");
+        agentClient.overrideAttemptId(2);
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
+        assertThat(run.getFailureReasonCode()).isEqualTo("AGENT_ATTEMPT_MISMATCH");
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsOnly("governance.review.started.v1");
+    }
+
+    @Test
+    void rejectsCompletedResultAfterEvaluationDeadline() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000012");
+        agentClient.completeAfterDeadline(30);
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.VERIFICATION_REQUIRED);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.FAILED);
+        assertThat(run.getFailureReasonCode()).isEqualTo("DEADLINE_EXCEEDED");
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsOnly("governance.review.started.v1");
+    }
+
+    @Test
+    void rejectsSnapshotIdentityMismatchBeyondDigest() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000013");
+        agentClient.overrideSnapshotField("snapshotId", "snapshot-other");
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
+        assertThat(run.getFailureReasonCode()).isEqualTo("SNAPSHOT_IDENTITY_MISMATCH");
+    }
+
+    @Test
+    void duplicateAcceptedResultDigestIsNoOp() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000014");
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        long outboxCount = outbox.count();
+
+        recordResultAgain(run, false);
+
+        EvaluationRunEntity unchangedRun = evaluationRuns.findById(run.getEvaluationRunId()).orElseThrow();
+        assertThat(unchangedRun.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
+        assertThat(outbox.count()).isEqualTo(outboxCount);
+    }
+
+    @Test
+    void conflictingAcceptedResultDigestBlocksRunWithoutUnrepresentableValidationEvent() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000015");
+        service.handleLoanApplicationSubmitted(submitted(applicationId));
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        long outboxCount = outbox.count();
+
+        recordResultAgain(run, true);
+
+        EvaluationRunEntity blockedRun = evaluationRuns.findById(run.getEvaluationRunId()).orElseThrow();
+        assertThat(blockedRun.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
+        assertThat(blockedRun.getFailureReasonCode()).isEqualTo("AGENT_RUN_RESULT_CONFLICT");
+        assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.BLOCKED);
+        assertThat(outbox.count()).isEqualTo(outboxCount);
+    }
+
+    @Test
     void mockEvaluationIsDeterministic() {
         MockDecisionEvaluator evaluator = new MockDecisionEvaluator();
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000003");
@@ -306,6 +433,19 @@ class DecisionCaseServiceIntegrationTest {
         );
     }
 
+    private void recordResultAgain(EvaluationRunEntity run, boolean conflicting) {
+        transactions.executeWithoutResult(status -> {
+            EvaluationRunEntity attachedRun = evaluationRuns.findById(run.getEvaluationRunId()).orElseThrow();
+            Object execution = ReflectionTestUtils.invokeMethod(service, "executionFromRun", attachedRun);
+            JsonNode request = ReflectionTestUtils.invokeMethod(execution, "request");
+            ObjectNode result = (ObjectNode) agentClient.execute(request);
+            if (conflicting) {
+                result.put("explanationDigest", "sha256:3333333333333333333333333333333333333333333333333333333333333333");
+            }
+            ReflectionTestUtils.invokeMethod(service, "validateAndRecordResult", execution, result, 1);
+        });
+    }
+
     private List<OutboxRow> outboxRowsByCreatedAt() {
         return jdbc.query(
                 "select event_type, payload, created_at from outbox_event order by created_at",
@@ -345,6 +485,17 @@ class DecisionCaseServiceIntegrationTest {
         try {
             var value = objectMapper.readTree(payload).get("causationId");
             return value == null || value.isNull() ? null : UUID.fromString(value.asText());
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private List<String> validationReasonCodes(String payload) {
+        try {
+            List<String> reasonCodes = new ArrayList<>();
+            objectMapper.readTree(payload).get("payload").get("validationReasonCodes")
+                    .forEach(reasonCode -> reasonCodes.add(reasonCode.asText()));
+            return reasonCodes;
         } catch (Exception exception) {
             throw new IllegalStateException(exception);
         }

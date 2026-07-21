@@ -2,8 +2,10 @@ package dev.rippleguard.governance;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.rippleguard.governance.application.LoanDecisionAgentClient;
 import dev.rippleguard.governance.infrastructure.agent.AgentRuntimeTimeoutException;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +26,10 @@ public class Phase2AgentClientTestConfiguration {
         private final ObjectMapper objectMapper;
         private final AtomicInteger calls = new AtomicInteger();
         private volatile int timeoutsBeforeSuccess;
+        private volatile Integer attemptIdOverride;
+        private volatile Long completedAtSecondsAfterDeadline;
+        private volatile String snapshotFieldOverride;
+        private volatile String snapshotValueOverride;
 
         RecordingLoanDecisionAgentClient(ObjectMapper objectMapper) {
             this.objectMapper = objectMapper;
@@ -36,16 +42,19 @@ public class Phase2AgentClientTestConfiguration {
                 timeoutsBeforeSuccess--;
                 throw new AgentRuntimeTimeoutException("test timeout", null);
             }
+            currentRequestedAt = request.get("requestedAt").asText();
+            currentDeadlineAt = request.get("deadlineAt").asText();
             Map<String, Object> agentRun = new LinkedHashMap<>();
             agentRun.put("schemaVersion", "1.0.0");
             agentRun.put("decisionCaseId", request.get("decisionCaseId").asText());
             agentRun.put("evaluationRunId", request.get("evaluationRunId").asText());
             agentRun.put("agentRunId", request.get("agentRunId").asText());
-            agentRun.put("attemptId", 1);
+            agentRun.put("attemptId", attemptIdOverride == null ? 1 : attemptIdOverride);
             agentRun.put("agentType", "LOAN_DECISION_AGENT");
             agentRun.put("requestIdempotencyKey", request.get("requestIdempotencyKey").asText());
             agentRun.put("startedAt", request.get("requestedAt").asText());
-            agentRun.put("completedAt", request.get("requestedAt").asText());
+            String completedAt = completedAt();
+            agentRun.put("completedAt", completedAt);
             agentRun.put("runtimeVersion", "agent-runtime.test");
 
             Map<String, Object> proposal = new LinkedHashMap<>();
@@ -76,8 +85,19 @@ public class Phase2AgentClientTestConfiguration {
             result.put("explanationRef", "shap://loan-agent/test/attempt-1");
             result.put("explanationDigest", "sha256:2222222222222222222222222222222222222222222222222222222222222222");
             result.put("evidenceRefs", List.of(request.get("snapshotReference").get("snapshotReference").asText()));
-            result.put("completedAt", request.get("requestedAt").asText());
-            return objectMapper.valueToTree(result);
+            result.put("completedAt", completedAt);
+            ObjectNode node = objectMapper.valueToTree(result);
+            if (snapshotFieldOverride != null) {
+                ((ObjectNode) node.get("snapshotReference")).put(snapshotFieldOverride, snapshotValueOverride);
+            }
+            return node;
+        }
+
+        private String completedAt() {
+            if (completedAtSecondsAfterDeadline != null) {
+                return Instant.parse(currentDeadlineAt).plusSeconds(completedAtSecondsAfterDeadline).toString();
+            }
+            return currentRequestedAt;
         }
 
         int calls() {
@@ -87,10 +107,30 @@ public class Phase2AgentClientTestConfiguration {
         void reset() {
             calls.set(0);
             timeoutsBeforeSuccess = 0;
+            attemptIdOverride = null;
+            completedAtSecondsAfterDeadline = null;
+            snapshotFieldOverride = null;
+            snapshotValueOverride = null;
         }
 
         void timeoutNextCalls(int count) {
             timeoutsBeforeSuccess = count;
+        }
+
+        private volatile String currentRequestedAt;
+        private volatile String currentDeadlineAt;
+
+        void overrideAttemptId(int attemptId) {
+            attemptIdOverride = attemptId;
+        }
+
+        void completeAfterDeadline(long seconds) {
+            completedAtSecondsAfterDeadline = seconds;
+        }
+
+        void overrideSnapshotField(String field, String value) {
+            snapshotFieldOverride = field;
+            snapshotValueOverride = value;
         }
     }
 }

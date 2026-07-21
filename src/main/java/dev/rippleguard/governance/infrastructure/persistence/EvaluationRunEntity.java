@@ -323,6 +323,16 @@ public class EvaluationRunEntity {
         this.leaseUntil = null;
     }
 
+    public void blockResultConflict(String reasonCode, Instant completedAt) {
+        this.status = EvaluationRunStatus.BLOCKED;
+        this.failureClassification = "BLOCKED";
+        this.failureReasonCode = reasonCode;
+        this.validationOutcome = "REJECTED";
+        this.completedAt = completedAt;
+        this.leaseOwner = null;
+        this.leaseUntil = null;
+    }
+
     public UUID getEvaluationRunId() {
         return evaluationRunId;
     }
