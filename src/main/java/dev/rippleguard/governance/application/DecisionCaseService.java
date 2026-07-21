@@ -24,6 +24,7 @@ import dev.rippleguard.governance.interfaces.rest.DecisionCaseResponse;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -197,7 +198,7 @@ public class DecisionCaseService {
                 "1.0.0",
                 snapshotDigest,
                 cause.eventId(),
-                cause.occurredAt(),
+                databaseTimestamp(cause.occurredAt()),
                 "snapshot://" + payload.applicationId() + "/" + payload.inputSnapshotVersion(),
                 "IMMUTABLE_REFERENCE",
                 executionPlan.featureSchemaVersion(),
@@ -418,7 +419,7 @@ public class DecisionCaseService {
         return matchesText(snapshot, "snapshotId", run.getSnapshotId())
                 && matchesText(snapshot, "snapshotVersion", run.getInputSnapshotVersion())
                 && matchesText(snapshot, "snapshotSchemaVersion", run.getSnapshotSchemaVersion())
-                && matchesText(snapshot, "snapshotCreatedAt", run.getSnapshotCreatedAt().toString())
+                && matchesInstant(snapshot, "snapshotCreatedAt", run.getSnapshotCreatedAt())
                 && matchesText(snapshot, "snapshotDigest", run.getSnapshotDigest())
                 && matchesText(snapshot, "snapshotReference", run.getSnapshotReference())
                 && matchesText(snapshot, "referenceType", run.getReferenceType());
@@ -518,6 +519,11 @@ public class DecisionCaseService {
         return expected != null && expected.equals(result.path(field).asText(null));
     }
 
+    private boolean matchesInstant(JsonNode result, String field, Instant expected) {
+        String value = result.path(field).asText(null);
+        return expected != null && value != null && expected.equals(parseInstant(value));
+    }
+
     private String failureClassification(JsonNode result, List<String> reasonCodes) {
         if (reasonCodes.contains("MODEL_PROVENANCE_INVALID") || reasonCodes.contains("SNAPSHOT_MISMATCH")) {
             return "BLOCKED";
@@ -540,6 +546,10 @@ public class DecisionCaseService {
 
     private Instant parseInstant(String value) {
         return OffsetDateTime.parse(value).toInstant();
+    }
+
+    private Instant databaseTimestamp(Instant value) {
+        return value == null ? null : value.truncatedTo(ChronoUnit.MICROS);
     }
 
     private AgentExecution recoverConcurrentDecisionCaseExecution(EventEnvelope event) {

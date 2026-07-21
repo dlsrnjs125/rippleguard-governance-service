@@ -393,6 +393,23 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
+    void phase2SnapshotCreatedAtUsesDatabasePrecisionForIdentityComparison() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000016");
+        Instant nanosecondOccurredAt = Instant.parse("2026-07-21T08:40:17.123456789Z");
+
+        service.handleLoanApplicationSubmitted(submitted(applicationId, "snapshot-v1", nanosecondOccurredAt));
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        assertThat(response.status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
+        assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
+        assertThat(outbox.findAll()).extracting("eventType")
+                .contains("governance.agent-result.validated.v1");
+    }
+
+    @Test
     void conflictingSubmittedEventMarksRecalculationRequired() {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000007");
 
@@ -408,21 +425,29 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     private EventEnvelope submitted(UUID applicationId, String snapshotVersion) {
+        return submitted(applicationId, snapshotVersion, Instant.now());
+    }
+
+    private EventEnvelope submitted(UUID applicationId, String snapshotVersion, Instant occurredAt) {
         return event(applicationId, Map.of(
                 "applicationId", applicationId.toString(),
                 "applicantId", "customer-42",
                 "inputSnapshotVersion", snapshotVersion,
                 "submittedAt", Instant.now().toString(),
                 "submissionChannel", "WEB"
-        ));
+        ), occurredAt);
     }
 
     private EventEnvelope event(UUID applicationId, Map<String, Object> payload) {
+        return event(applicationId, payload, Instant.now());
+    }
+
+    private EventEnvelope event(UUID applicationId, Map<String, Object> payload, Instant occurredAt) {
         return new EventEnvelope(
                 UUID.randomUUID(),
                 "loan.application.submitted.v1",
                 "1.1.0",
-                Instant.now(),
+                occurredAt,
                 "loan-service",
                 applicationId,
                 applicationId.toString(),
