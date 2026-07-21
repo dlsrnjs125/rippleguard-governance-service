@@ -17,6 +17,7 @@ import dev.rippleguard.governance.infrastructure.persistence.OutboxEventReposito
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -321,6 +322,8 @@ class DecisionCaseServiceIntegrationTest {
         EvaluationRunEntity run = evaluationRuns
                 .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
                 .orElseThrow();
+        assertThat(run.getRequestedAt()).isEqualTo(run.getRequestedAt().truncatedTo(ChronoUnit.MICROS));
+        assertThat(run.getDeadlineAt()).isEqualTo(run.getDeadlineAt().truncatedTo(ChronoUnit.MICROS));
         long outboxCount = outbox.count();
 
         recordResultAgain(run, false);

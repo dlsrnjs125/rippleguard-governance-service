@@ -140,7 +140,7 @@ public class DecisionCaseService {
             return AgentExecution.skipped();
         }
 
-        Instant now = clock.instant();
+        Instant now = databaseTimestamp(clock.instant());
         String caseId = "case-" + payload.applicationId();
         DecisionCaseEntity decisionCase = decisionCases.saveAndFlush(new DecisionCaseEntity(
                 caseId,
@@ -177,7 +177,8 @@ public class DecisionCaseService {
                                                     Instant now) {
         UUID evaluationRunId = UUID.randomUUID();
         UUID agentRunId = UUID.randomUUID();
-        Instant deadline = now.plus(executionPlan.requestTimeout());
+        Instant requestedAt = databaseTimestamp(now);
+        Instant deadline = databaseTimestamp(requestedAt.plus(executionPlan.requestTimeout()));
         String snapshotDigest = json.sha256Prefixed(cause.payload().toString());
         String requestIdempotencyKey = requestIdempotencyKey(
                 decisionCase.getCaseId(), evaluationRunId, payload.inputSnapshotVersion(), payloadHash);
@@ -188,7 +189,7 @@ public class DecisionCaseService {
                 payload.inputSnapshotVersion(),
                 UUID.randomUUID(),
                 json.canonicalJson(componentVersions()),
-                now
+                requestedAt
         );
         run.configurePhase2(
                 executionPlan.planVersion(),
@@ -207,7 +208,7 @@ public class DecisionCaseService {
                 executionPlan.modelArtifactDigest(),
                 executionPlan.thresholdVersion(),
                 executionPlan.maxAttempts(),
-                now,
+                requestedAt,
                 deadline
         );
         return evaluationRuns.saveAndFlush(run);
