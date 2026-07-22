@@ -83,6 +83,12 @@ public class EvaluationRunEntity {
     @Column(name = "feature_schema_version", length = 128)
     private String featureSchemaVersion;
 
+    @Column(name = "feature_payload_digest", length = 80)
+    private String featurePayloadDigest;
+
+    @Column(name = "feature_payload", columnDefinition = "text")
+    private String featurePayload;
+
     @Column(name = "preprocessing_version", length = 128)
     private String preprocessingVersion;
 
@@ -124,6 +130,9 @@ public class EvaluationRunEntity {
 
     @Column(name = "source_event_id")
     private UUID sourceEventId;
+
+    @Column(name = "request_event_id")
+    private UUID requestEventId;
 
     @Column(name = "snapshot_created_at")
     private Instant snapshotCreatedAt;
@@ -196,6 +205,8 @@ public class EvaluationRunEntity {
                                 String snapshotReference,
                                 String referenceType,
                                 String featureSchemaVersion,
+                                String featurePayloadDigest,
+                                String featurePayload,
                                 String preprocessingVersion,
                                 String modelVersion,
                                 String modelArtifactDigest,
@@ -218,6 +229,8 @@ public class EvaluationRunEntity {
         this.snapshotReference = snapshotReference;
         this.referenceType = referenceType;
         this.featureSchemaVersion = featureSchemaVersion;
+        this.featurePayloadDigest = featurePayloadDigest;
+        this.featurePayload = featurePayload;
         this.preprocessingVersion = preprocessingVersion;
         this.modelVersion = modelVersion;
         this.modelArtifactDigest = modelArtifactDigest;
@@ -226,6 +239,13 @@ public class EvaluationRunEntity {
         this.requestedAt = requestedAt;
         this.deadlineAt = deadlineAt;
         this.nextAttemptAt = requestedAt;
+    }
+
+    public void attachRequestEvent(UUID requestEventId) {
+        if (status != EvaluationRunStatus.CREATED && status != EvaluationRunStatus.RUNNING) {
+            throw new IllegalStateException("Evaluation run cannot attach request event after terminal status: " + status);
+        }
+        this.requestEventId = requestEventId;
     }
 
     public void start() {
@@ -413,6 +433,14 @@ public class EvaluationRunEntity {
         return featureSchemaVersion;
     }
 
+    public String getFeaturePayloadDigest() {
+        return featurePayloadDigest;
+    }
+
+    public String getFeaturePayload() {
+        return featurePayload;
+    }
+
     public String getPreprocessingVersion() {
         return preprocessingVersion;
     }
@@ -467,6 +495,10 @@ public class EvaluationRunEntity {
 
     public UUID getSourceEventId() {
         return sourceEventId;
+    }
+
+    public UUID getRequestEventId() {
+        return requestEventId;
     }
 
     public Instant getSnapshotCreatedAt() {

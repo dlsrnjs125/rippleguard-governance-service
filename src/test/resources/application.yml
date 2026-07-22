@@ -30,6 +30,13 @@ rippleguard:
     connect-timeout: 1s
     response-timeout: 2s
     max-response-bytes: 1048576
+  loan-service:
+    enabled: true
+    base-url: http://loan-service.test
+    feature-snapshots-path-template: /internal/api/v1/loan-applications/{applicationId}/phase2-feature-snapshots/{snapshotVersion}
+    service-token: test-token
+    connect-timeout: 1s
+    response-timeout: 2s
   phase2:
     execution-plan:
       plan-version: phase2-loan-agent.v1

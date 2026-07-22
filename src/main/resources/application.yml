@@ -45,6 +45,13 @@ rippleguard:
   loan:
     repository: dlsrnjs125/rippleguard-loan-service
     commit: 54ea344a682723d61d9beedf4ade56ee48029c0d
+  loan-service:
+    enabled: ${LOAN_SERVICE_SNAPSHOT_CLIENT_ENABLED:true}
+    base-url: ${LOAN_SERVICE_BASE_URL}
+    feature-snapshots-path-template: ${LOAN_SERVICE_FEATURE_SNAPSHOTS_PATH_TEMPLATE:/internal/api/v1/loan-applications/{applicationId}/phase2-feature-snapshots/{snapshotVersion}}
+    service-token: ${LOAN_SERVICE_INTERNAL_TOKEN}
+    connect-timeout: ${LOAN_SERVICE_CONNECT_TIMEOUT:2s}
+    response-timeout: ${LOAN_SERVICE_RESPONSE_TIMEOUT:5s}
   kafka:
     enabled: ${GOVERNANCE_KAFKA_ENABLED:true}
     topics:
