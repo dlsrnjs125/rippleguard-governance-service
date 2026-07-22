@@ -45,8 +45,12 @@ public class DecisionCaseService {
     private static final Logger log = LoggerFactory.getLogger(DecisionCaseService.class);
     private static final String LOAN_SUBMITTED_SCHEMA_VERSION = "1.1.0";
     private static final String GOVERNANCE_AGENT_EVENT_SCHEMA_VERSION = "1.0.0";
+    private static final String REQUESTED_EVENT_SCHEMA_VERSION = "1.1.0";
     private static final String REQUEST_SCHEMA = "commands/loan-decision-agent-request.v1.0.0.schema.json";
     private static final String RESULT_SCHEMA = "agent-output/loan-decision-agent-result.v1.0.0.schema.json";
+    private static final String SNAPSHOT_REFERENCE_SCHEMA = "domain/snapshot-reference.v1.0.0.schema.json";
+    private static final String FEATURE_PAYLOAD_SCHEMA = "domain/feature-payload.v1.0.0.schema.json";
+    private static final String REQUESTED_EVENT_SCHEMA = "events/agent.evaluation.requested.v1.1.0.schema.json";
     private static final String VALIDATED_EVENT_SCHEMA = "events/governance.agent-result.validated.v1.0.0.schema.json";
 
     private final DecisionCaseRepository decisionCases;
@@ -55,6 +59,7 @@ public class DecisionCaseService {
     private final OutboxEventRepository outbox;
     private final GovernanceEventQuarantineRepository quarantine;
     private final JsonSupport json;
+    private final LoanFeatureSnapshotClient snapshots;
     private final LoanDecisionAgentClient agentClient;
     private final ContractSchemaValidator contracts;
     private final Phase2ExecutionPlanProperties executionPlan;
@@ -68,6 +73,7 @@ public class DecisionCaseService {
                                OutboxEventRepository outbox,
                                GovernanceEventQuarantineRepository quarantine,
                                JsonSupport json,
+                               LoanFeatureSnapshotClient snapshots,
                                LoanDecisionAgentClient agentClient,
                                ContractSchemaValidator contracts,
                                Phase2ExecutionPlanProperties executionPlan,
@@ -79,6 +85,7 @@ public class DecisionCaseService {
         this.outbox = outbox;
         this.quarantine = quarantine;
         this.json = json;
+        this.snapshots = snapshots;
         this.agentClient = agentClient;
         this.contracts = contracts;
         this.executionPlan = executionPlan;
@@ -87,9 +94,10 @@ public class DecisionCaseService {
     }
 
     public void handleLoanApplicationSubmitted(EventEnvelope event) {
+        SnapshotAcquisition snapshot = snapshotAcquisitionFor(event);
         AgentExecution execution;
         try {
-            execution = transactions.execute(status -> planAgentExecution(event));
+            execution = transactions.execute(status -> planAgentExecution(event, snapshot));
         } catch (DataIntegrityViolationException conflict) {
             execution = recoverPlanningConflict(event, conflict);
         } catch (OptimisticLockingFailureException conflict) {
@@ -100,6 +108,74 @@ public class DecisionCaseService {
         }
 
         executeAgentRun(execution);
+    }
+
+    private SnapshotAcquisition snapshotAcquisitionFor(EventEnvelope event) {
+        if (!supportsEvent(event, "loan.application.submitted.v1", LOAN_SUBMITTED_SCHEMA_VERSION)
+                || inbox.existsById(event.eventId())) {
+            return SnapshotAcquisition.notNeeded();
+        }
+        LoanApplicationSubmittedPayload payload =
+                json.fromJson(event.payload().toString(), LoanApplicationSubmittedPayload.class);
+        validateEnvelope(event, payload);
+        if (payload.inputSnapshotVersion() == null || payload.inputSnapshotVersion().isBlank()
+                || decisionCases.findByApplicationId(payload.applicationId()).isPresent()) {
+            return SnapshotAcquisition.notNeeded();
+        }
+        try {
+            Phase2FeatureSnapshot snapshot = snapshots.getByReference(payload.applicationId(), payload.inputSnapshotVersion());
+            verifySnapshotPayload(event, payload, snapshot);
+            return SnapshotAcquisition.available(snapshot);
+        } catch (LoanFeatureSnapshotNotFoundException exception) {
+            return SnapshotAcquisition.failed("VERIFICATION_REQUIRED", "FEATURE_SNAPSHOT_NOT_FOUND");
+        } catch (LoanFeatureSnapshotAccessDeniedException exception) {
+            return SnapshotAcquisition.failed("BLOCKED", "FEATURE_SNAPSHOT_ACCESS_DENIED");
+        } catch (LoanFeatureSnapshotRequestRejectedException exception) {
+            return SnapshotAcquisition.failed("VALIDATION_REQUIRED", "FEATURE_SNAPSHOT_REQUEST_REJECTED");
+        } catch (ContractValidationException exception) {
+            return SnapshotAcquisition.failed("VALIDATION_REQUIRED", "FEATURE_PAYLOAD_CONTRACT_INVALID");
+        } catch (SnapshotVerificationException exception) {
+            return SnapshotAcquisition.failed(exception.classification(), exception.reasonCode());
+        }
+    }
+
+    private void verifySnapshotPayload(EventEnvelope event, LoanApplicationSubmittedPayload payload,
+                                       Phase2FeatureSnapshot snapshot) {
+        if (snapshot == null) {
+            throw new LoanFeatureSnapshotTransportException("Loan Service returned an empty feature snapshot", null);
+        }
+        if (!"1.0.0".equals(snapshot.schemaVersion())
+                || !payload.applicationId().equals(snapshot.applicationId())
+                || !payload.inputSnapshotVersion().equals(snapshot.snapshotVersion())
+                || !executionPlan.featureSchemaVersion().equals(snapshot.featureSchemaVersion())) {
+            throw new SnapshotVerificationException("BLOCKED", "FEATURE_SNAPSHOT_IDENTITY_MISMATCH",
+                    "Loan feature snapshot identity did not match submitted event");
+        }
+        JsonNode snapshotReference = snapshot.snapshotReference();
+        JsonNode featurePayload = snapshot.featurePayload();
+        contracts.validate(SNAPSHOT_REFERENCE_SCHEMA, snapshotReference);
+        contracts.validate(FEATURE_PAYLOAD_SCHEMA, featurePayload);
+        if (!snapshot.snapshotId().toString().equals(snapshotReference.path("snapshotId").asText())
+                || !snapshot.snapshotVersion().equals(snapshotReference.path("snapshotVersion").asText())
+                || !snapshot.snapshotSchemaVersion().equals(snapshotReference.path("snapshotSchemaVersion").asText())
+                || !snapshot.createdAt().equals(parseInstant(snapshotReference.path("snapshotCreatedAt").asText()))
+                || !snapshot.featurePayloadDigest().equals(snapshotReference.path("snapshotDigest").asText())
+                || !"MATERIALIZED_FEATURES".equals(snapshotReference.path("referenceType").asText())) {
+            throw new SnapshotVerificationException("BLOCKED", "SNAPSHOT_DIGEST_MISMATCH",
+                    "Loan feature snapshot reference fields did not match API identity");
+        }
+        String declaredFeatureDigest = featurePayload.path("featurePayloadDigest").asText(null);
+        if (!snapshot.featurePayloadDigest().equals(declaredFeatureDigest)) {
+            throw new SnapshotVerificationException("BLOCKED", "FEATURE_PAYLOAD_DIGEST_MISMATCH",
+                    "Feature payload digest did not match API digest");
+        }
+        Map<String, Object> digestInput = json.fromJson(featurePayload.toString(), Map.class);
+        digestInput.remove("featurePayloadDigest");
+        String actualFeatureDigest = json.sha256Prefixed(json.canonicalJson(digestInput));
+        if (!snapshot.featurePayloadDigest().equals(actualFeatureDigest)) {
+            throw new SnapshotVerificationException("BLOCKED", "FEATURE_PAYLOAD_DIGEST_MISMATCH",
+                    "Feature payload canonical digest mismatch for event " + event.eventId());
+        }
     }
 
     @Scheduled(fixedDelayString = "${AGENT_RUNTIME_RECOVERY_DELAY_MS:5000}")
@@ -116,7 +192,7 @@ public class DecisionCaseService {
         executions.forEach(this::executeAgentRun);
     }
 
-    private AgentExecution planAgentExecution(EventEnvelope event) {
+    private AgentExecution planAgentExecution(EventEnvelope event, SnapshotAcquisition snapshot) {
         if (!supportsEvent(event, "loan.application.submitted.v1", LOAN_SUBMITTED_SCHEMA_VERSION)) {
             quarantine(event, QuarantineFailureCode.UNSUPPORTED_SCHEMA_VERSION,
                     "Unsupported event contract: " + event.eventType() + " " + event.schemaVersion(), false);
@@ -157,13 +233,29 @@ public class DecisionCaseService {
             recordInbox(event, payloadHash);
             return AgentExecution.skipped();
         }
+        if (snapshot == null || !snapshot.available()) {
+            String classification = snapshot == null ? "VALIDATION_REQUIRED" : snapshot.classification();
+            String reasonCode = snapshot == null ? "FEATURE_SNAPSHOT_UNAVAILABLE" : snapshot.reasonCode();
+            if ("BLOCKED".equals(classification)) {
+                decisionCase.markBlocked(reasonCode, "FEATURE_SNAPSHOT_REJECTED", now);
+            } else {
+                decisionCase.markVerificationRequired(reasonCode, "FEATURE_SNAPSHOT_REJECTED", now);
+            }
+            log.info("Phase 2 feature snapshot rejected applicationId={} caseId={} classification={} reasonCode={}",
+                    payload.applicationId(), decisionCase.getCaseId(), classification, reasonCode);
+            recordInbox(event, payloadHash);
+            return AgentExecution.skipped();
+        }
 
         decisionCase.markPreflightCompleted(now);
         decisionCase.transitionTo(DecisionCaseStatus.EVALUATION_REQUESTED, now);
-        EvaluationRunEntity run = createEvaluationRun(decisionCase, payload, event, payloadHash, now);
+        EvaluationRunEntity run = createEvaluationRun(decisionCase, payload, event, snapshot.snapshot(), now);
         ObjectNode request = buildAgentRequest(decisionCase, run);
         contracts.validate(REQUEST_SCHEMA, request);
         run.start();
+        OutboxEventEntity requestedEvent = agentEvaluationRequestedEvent(decisionCase, run, event.eventId(), now.plusMillis(1));
+        outbox.save(requestedEvent);
+        run.attachRequestEvent(requestedEvent.getEventId());
         recordInbox(event, payloadHash);
         log.info("Phase 2 agent execution planned applicationId={} caseId={} evaluationRunId={} agentRunId={}",
                 payload.applicationId(), caseId, run.getEvaluationRunId(), run.getAgentRunId());
@@ -173,20 +265,23 @@ public class DecisionCaseService {
     private EvaluationRunEntity createEvaluationRun(DecisionCaseEntity decisionCase,
                                                     LoanApplicationSubmittedPayload payload,
                                                     EventEnvelope cause,
-                                                    String payloadHash,
+                                                    Phase2FeatureSnapshot snapshot,
                                                     Instant now) {
         UUID evaluationRunId = UUID.randomUUID();
         UUID agentRunId = UUID.randomUUID();
         Instant requestedAt = databaseTimestamp(now);
         Instant deadline = databaseTimestamp(requestedAt.plus(executionPlan.requestTimeout()));
-        String snapshotDigest = json.sha256Prefixed(cause.payload().toString());
         String requestIdempotencyKey = requestIdempotencyKey(
-                decisionCase.getCaseId(), evaluationRunId, payload.inputSnapshotVersion(), payloadHash);
+                decisionCase.getCaseId(),
+                evaluationRunId,
+                snapshot.snapshotVersion(),
+                snapshot.snapshotReference().path("snapshotDigest").asText(),
+                snapshot.featurePayloadDigest());
         EvaluationRunEntity run = new EvaluationRunEntity(
                 evaluationRunId,
                 decisionCase,
                 executionPlan.planVersion(),
-                payload.inputSnapshotVersion(),
+                snapshot.snapshotVersion(),
                 UUID.randomUUID(),
                 json.canonicalJson(componentVersions()),
                 requestedAt
@@ -195,14 +290,16 @@ public class DecisionCaseService {
                 executionPlan.planVersion(),
                 agentRunId,
                 requestIdempotencyKey,
-                "snapshot-" + payload.applicationId(),
-                "1.0.0",
-                snapshotDigest,
+                snapshot.snapshotId().toString(),
+                snapshot.snapshotSchemaVersion(),
+                snapshot.snapshotReference().path("snapshotDigest").asText(),
                 cause.eventId(),
-                databaseTimestamp(cause.occurredAt()),
-                "snapshot://" + payload.applicationId() + "/" + payload.inputSnapshotVersion(),
-                "IMMUTABLE_REFERENCE",
-                executionPlan.featureSchemaVersion(),
+                databaseTimestamp(snapshot.createdAt()),
+                snapshot.snapshotReference().path("snapshotReference").asText(),
+                snapshot.snapshotReference().path("referenceType").asText(),
+                snapshot.featureSchemaVersion(),
+                snapshot.featurePayloadDigest(),
+                json.canonicalJson(snapshot.featurePayload()),
                 executionPlan.preprocessingVersion(),
                 executionPlan.modelVersion(),
                 executionPlan.modelArtifactDigest(),
@@ -337,6 +434,8 @@ public class DecisionCaseService {
         } else {
             decisionCase.markVerificationRequired(reasonCode, "AGENT_RESULT_REJECTED", completedAt);
         }
+        log.info("Phase 2 agent result rejected evaluationRunId={} classification={} reasonCode={} reasonCodes={}",
+                run.getEvaluationRunId(), classification, reasonCode, reasonCodes);
         Instant validatedAt = completedAt.plusMillis(1);
         outbox.save(agentResultValidatedEvent(decisionCase, run, attemptId, resultDigest,
                 "REJECTED", reasonCodes, validatedAt));
@@ -471,6 +570,7 @@ public class DecisionCaseService {
         request.put("requestIdempotencyKey", run.getRequestIdempotencyKey());
         request.put("snapshotReference", snapshotReference);
         request.put("featureSchemaVersion", run.getFeatureSchemaVersion());
+        request.put("featurePayload", json.fromJson(run.getFeaturePayload(), Map.class));
         request.put("preprocessingVersion", run.getPreprocessingVersion());
         request.put("modelVersion", run.getModelVersion());
         request.put("modelArtifactDigest", run.getModelArtifactDigest());
@@ -499,13 +599,15 @@ public class DecisionCaseService {
                 && reasonCodes.contains("SNAPSHOT_MATCHED");
     }
 
-    private String requestIdempotencyKey(String decisionCaseId, UUID evaluationRunId, String snapshotVersion, String payloadHash) {
+    private String requestIdempotencyKey(String decisionCaseId, UUID evaluationRunId, String snapshotVersion,
+                                         String snapshotDigest, String featurePayloadDigest) {
         Map<String, Object> keyInputs = new LinkedHashMap<>();
         keyInputs.put("decisionCaseId", decisionCaseId);
         keyInputs.put("evaluationRunId", evaluationRunId.toString());
         keyInputs.put("agentType", "LOAN_DECISION_AGENT");
         keyInputs.put("snapshotVersion", snapshotVersion);
-        keyInputs.put("snapshotPayloadHash", payloadHash);
+        keyInputs.put("snapshotDigest", snapshotDigest);
+        keyInputs.put("featurePayloadDigest", featurePayloadDigest);
         keyInputs.put("featureSchemaVersion", executionPlan.featureSchemaVersion());
         keyInputs.put("preprocessingVersion", executionPlan.preprocessingVersion());
         keyInputs.put("modelVersion", executionPlan.modelVersion());
@@ -711,6 +813,20 @@ public class DecisionCaseService {
         return event("governance.review.started.v1", LOAN_SUBMITTED_SCHEMA_VERSION, decisionCase, null, cause.eventId(), payload, now);
     }
 
+    private OutboxEventEntity agentEvaluationRequestedEvent(DecisionCaseEntity decisionCase, EvaluationRunEntity run,
+                                                            UUID causeEventId, Instant now) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("evaluationRunId", run.getEvaluationRunId().toString());
+        payload.put("decisionCaseId", decisionCase.getCaseId());
+        payload.put("inputSnapshotVersion", run.getInputSnapshotVersion());
+        payload.put("executionPlanVersion", run.getExecutionPlanVersion());
+        payload.put("evaluationMode", "AGENT");
+        OutboxEventEntity event = event("agent.evaluation.requested.v1", REQUESTED_EVENT_SCHEMA_VERSION,
+                decisionCase, run.getEvaluationRunId(), causeEventId, payload, now);
+        contracts.validate(REQUESTED_EVENT_SCHEMA, json.toJsonNode(json.fromJson(event.getPayload(), Map.class)));
+        return event;
+    }
+
     private OutboxEventEntity agentResultValidatedEvent(DecisionCaseEntity decisionCase, EvaluationRunEntity run,
                                                         int attemptId, String resultDigest, String outcome,
                                                         List<String> reasonCodes, Instant now) {
@@ -726,7 +842,7 @@ public class DecisionCaseService {
         payload.put("validatedSchemaVersion", "1.0.0");
         payload.put("validatedAt", now.toString());
         OutboxEventEntity event = event("governance.agent-result.validated.v1", GOVERNANCE_AGENT_EVENT_SCHEMA_VERSION,
-                decisionCase, run.getEvaluationRunId(), run.getAgentRunId(), payload, now);
+                decisionCase, run.getEvaluationRunId(), run.getRequestEventId(), payload, now);
         contracts.validate(VALIDATED_EVENT_SCHEMA, json.toJsonNode(json.fromJson(event.getPayload(), Map.class)));
         return event;
     }
@@ -800,5 +916,28 @@ public class DecisionCaseService {
     }
 
     private record AttemptLease(int attemptId) {
+    }
+
+    private record SnapshotAcquisition(
+            Phase2FeatureSnapshot snapshot,
+            String classification,
+            String reasonCode,
+            boolean needed
+    ) {
+        static SnapshotAcquisition available(Phase2FeatureSnapshot snapshot) {
+            return new SnapshotAcquisition(snapshot, null, null, true);
+        }
+
+        static SnapshotAcquisition failed(String classification, String reasonCode) {
+            return new SnapshotAcquisition(null, classification, reasonCode, true);
+        }
+
+        static SnapshotAcquisition notNeeded() {
+            return new SnapshotAcquisition(null, null, null, false);
+        }
+
+        boolean available() {
+            return needed && snapshot != null;
+        }
     }
 }

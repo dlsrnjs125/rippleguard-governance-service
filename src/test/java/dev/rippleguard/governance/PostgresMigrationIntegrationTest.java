@@ -134,6 +134,19 @@ class PostgresMigrationIntegrationTest {
         assertThat(claimed).extracting(OutboxEventEntity::getEventType)
                 .containsExactly(
                         "governance.review.started.v1",
+                        "agent.evaluation.requested.v1"
+                );
+
+        jdbc.update("""
+                update outbox_event
+                set status = 'PUBLISHED', published_at = now(), updated_at = now()
+                where event_type in ('governance.review.started.v1', 'agent.evaluation.requested.v1')
+                """);
+
+        var afterRequestPublished = transactions.execute(status ->
+                outbox.findClaimable(Instant.now().plusSeconds(60), 10));
+        assertThat(afterRequestPublished).extracting(OutboxEventEntity::getEventType)
+                .containsExactly(
                         "governance.agent-result.validated.v1"
                 );
     }
@@ -157,7 +170,7 @@ class PostgresMigrationIntegrationTest {
         assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
         assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(3);
     }
 
     @Test
@@ -192,7 +205,7 @@ class PostgresMigrationIntegrationTest {
         assertThat(results).filteredOn(Throwable.class::isInstance).isEmpty();
         assertThat(service.getByApplication(applicationId).status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(jdbc.queryForObject("select count(*) from decision_case", Long.class)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("select count(*) from outbox_event", Long.class)).isEqualTo(3);
         assertThat(jdbc.queryForObject("select count(*) from inbox_event", Long.class)).isEqualTo(2);
     }
 
