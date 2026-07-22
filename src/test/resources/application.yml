@@ -14,7 +14,7 @@ spring:
 rippleguard:
   contracts:
     repository: dlsrnjs125/rippleguard-contracts
-    commit: f4012e8
+    commit: 751f43c88c1bef860c76398eed24b3d60225b931
     event-schema-version: 1.1.0
     root: ${CONTRACTS_ROOT:../rippleguard-contracts}
   kafka:
@@ -31,7 +31,6 @@ rippleguard:
     response-timeout: 2s
     max-response-bytes: 1048576
   loan-service:
-    enabled: true
     base-url: http://loan-service.test
     feature-snapshots-path-template: /internal/api/v1/loan-applications/{applicationId}/phase2-feature-snapshots/{snapshotVersion}
     service-token: test-token

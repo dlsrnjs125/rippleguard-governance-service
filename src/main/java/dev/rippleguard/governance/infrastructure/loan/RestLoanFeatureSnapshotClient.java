@@ -1,14 +1,15 @@
 package dev.rippleguard.governance.infrastructure.loan;
 
+import dev.rippleguard.governance.application.LoanFeatureSnapshotAccessDeniedException;
 import dev.rippleguard.governance.application.LoanFeatureSnapshotClient;
 import dev.rippleguard.governance.application.LoanFeatureSnapshotNotFoundException;
+import dev.rippleguard.governance.application.LoanFeatureSnapshotRequestRejectedException;
 import dev.rippleguard.governance.application.LoanFeatureSnapshotTimeoutException;
 import dev.rippleguard.governance.application.LoanFeatureSnapshotTransportException;
 import dev.rippleguard.governance.application.Phase2FeatureSnapshot;
 import java.net.SocketTimeoutException;
 import java.util.Map;
 import java.util.UUID;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
@@ -18,7 +19,6 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 @Component
-@ConditionalOnProperty(name = "rippleguard.loan-service.enabled", havingValue = "true")
 public class RestLoanFeatureSnapshotClient implements LoanFeatureSnapshotClient {
     private static final String SERVICE_TOKEN_HEADER = "X-Internal-Service-Token";
 
@@ -52,6 +52,18 @@ public class RestLoanFeatureSnapshotClient implements LoanFeatureSnapshotClient 
                 throw new LoanFeatureSnapshotNotFoundException(
                         "Phase 2 feature snapshot not found: " + applicationId + " " + snapshotVersion);
             }
+            if (exception.getStatusCode() == HttpStatus.UNAUTHORIZED
+                    || exception.getStatusCode() == HttpStatus.FORBIDDEN) {
+                throw new LoanFeatureSnapshotAccessDeniedException(
+                        "Loan Service snapshot access denied", exception);
+            }
+            if (exception.getStatusCode() == HttpStatus.REQUEST_TIMEOUT
+                    || exception.getStatusCode() == HttpStatus.TOO_MANY_REQUESTS) {
+                throw new LoanFeatureSnapshotTransportException("Loan Service snapshot request failed", exception);
+            }
+            throw new LoanFeatureSnapshotRequestRejectedException(
+                    "Loan Service rejected snapshot request with " + exception.getStatusCode(), exception);
+        } catch (org.springframework.web.client.HttpServerErrorException exception) {
             throw new LoanFeatureSnapshotTransportException("Loan Service snapshot request failed", exception);
         } catch (ResourceAccessException exception) {
             if (exception.getCause() instanceof SocketTimeoutException) {

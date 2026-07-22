@@ -8,7 +8,6 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @ConfigurationProperties(prefix = "rippleguard.loan-service")
 public record LoanFeatureSnapshotProperties(
-        boolean enabled,
         @NotBlank String baseUrl,
         @NotBlank String featureSnapshotsPathTemplate,
         @NotBlank String serviceToken,
@@ -22,7 +21,7 @@ public record LoanFeatureSnapshotProperties(
         if (responseTimeout == null || responseTimeout.isNegative() || responseTimeout.isZero()) {
             throw new IllegalArgumentException("responseTimeout must be positive");
         }
-        if (enabled && baseUrl.contains("localhost")) {
+        if (baseUrl.contains("localhost")) {
             throw new IllegalArgumentException("Loan Service baseUrl must not rely on localhost");
         }
     }

@@ -39,14 +39,13 @@ management:
 rippleguard:
   contracts:
     repository: dlsrnjs125/rippleguard-contracts
-    commit: f4012e8
+    commit: 751f43c88c1bef860c76398eed24b3d60225b931
     event-schema-version: 1.1.0
     root: ${CONTRACTS_ROOT}
   loan:
     repository: dlsrnjs125/rippleguard-loan-service
-    commit: 54ea344a682723d61d9beedf4ade56ee48029c0d
+    commit: 1f78f8c3358fc0437b15f7b32ae8b2d4028a4800
   loan-service:
-    enabled: ${LOAN_SERVICE_SNAPSHOT_CLIENT_ENABLED:true}
     base-url: ${LOAN_SERVICE_BASE_URL}
     feature-snapshots-path-template: ${LOAN_SERVICE_FEATURE_SNAPSHOTS_PATH_TEMPLATE:/internal/api/v1/loan-applications/{applicationId}/phase2-feature-snapshots/{snapshotVersion}}
     service-token: ${LOAN_SERVICE_INTERNAL_TOKEN}

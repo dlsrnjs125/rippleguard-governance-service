@@ -128,6 +128,10 @@ public class DecisionCaseService {
             return SnapshotAcquisition.available(snapshot);
         } catch (LoanFeatureSnapshotNotFoundException exception) {
             return SnapshotAcquisition.failed("VERIFICATION_REQUIRED", "FEATURE_SNAPSHOT_NOT_FOUND");
+        } catch (LoanFeatureSnapshotAccessDeniedException exception) {
+            return SnapshotAcquisition.failed("BLOCKED", "FEATURE_SNAPSHOT_ACCESS_DENIED");
+        } catch (LoanFeatureSnapshotRequestRejectedException exception) {
+            return SnapshotAcquisition.failed("VALIDATION_REQUIRED", "FEATURE_SNAPSHOT_REQUEST_REJECTED");
         } catch (ContractValidationException exception) {
             return SnapshotAcquisition.failed("VALIDATION_REQUIRED", "FEATURE_PAYLOAD_CONTRACT_INVALID");
         } catch (SnapshotVerificationException exception) {
