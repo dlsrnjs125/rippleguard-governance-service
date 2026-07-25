@@ -147,7 +147,7 @@ class PostgresMigrationIntegrationTest {
                 outbox.findClaimable(Instant.now().plusSeconds(60), 10));
         assertThat(afterRequestPublished).extracting(OutboxEventEntity::getEventType)
                 .containsExactly(
-                        "governance.agent-result.validated.v1"
+                        "governance.agent-result.validated.v2"
                 );
     }
 

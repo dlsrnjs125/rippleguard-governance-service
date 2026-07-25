@@ -81,7 +81,7 @@ class DecisionCaseServiceIntegrationTest {
     }
 
     @Test
-    void submittedEventCreatesCaseEvaluationAndAgentValidationOutbox() {
+    void submittedEventCreatesCaseEvaluationAndAgentValidationOutbox() throws Exception {
         UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000001");
         EventEnvelope submitted = submitted(applicationId);
         service.handleLoanApplicationSubmitted(submitted);
@@ -98,7 +98,7 @@ class DecisionCaseServiceIntegrationTest {
                 .containsExactlyInAnyOrder(
                         "governance.review.started.v1",
                         "agent.evaluation.requested.v1",
-                        "governance.agent-result.validated.v1"
+                        "governance.agent-result.validated.v2"
                 );
 
         List<OutboxRow> rows = outboxRowsByCreatedAt();
@@ -106,7 +106,7 @@ class DecisionCaseServiceIntegrationTest {
                 .containsExactly(
                         "governance.review.started.v1",
                         "agent.evaluation.requested.v1",
-                        "governance.agent-result.validated.v1"
+                        "governance.agent-result.validated.v2"
                 );
         assertThat(rows.get(0).createdAt()).isBefore(rows.get(1).createdAt());
 
@@ -128,10 +128,30 @@ class DecisionCaseServiceIntegrationTest {
                 .getAgentRunId();
         assertThat(causationId(payloadFor(rows, "agent.evaluation.requested.v1")))
                 .isEqualTo(submitted.eventId());
-        assertThat(causationId(payloadFor(rows, "governance.agent-result.validated.v1")))
+        assertThat(causationId(payloadFor(rows, "governance.agent-result.validated.v2")))
                 .isEqualTo(requestEventId);
-        assertThat(causationId(payloadFor(rows, "governance.agent-result.validated.v1")))
+        assertThat(causationId(payloadFor(rows, "governance.agent-result.validated.v2")))
                 .isNotEqualTo(agentRunId);
+        JsonNode validationEvent = objectMapper.readTree(payloadFor(rows, "governance.agent-result.validated.v2"));
+        JsonNode validationPayload = validationEvent.get("payload");
+        assertThat(validationEvent.get("schemaVersion").asText()).isEqualTo("2.0.0");
+        assertThat(validationPayload.get("requestEventId").asText()).isEqualTo(requestEventId.toString());
+        JsonNode snapshotReference = snapshotClient.lastSnapshot().snapshotReference();
+        assertThat(validationPayload.get("snapshotId").asText()).isEqualTo(snapshotReference.path("snapshotId").asText());
+        assertThat(validationPayload.get("snapshotVersion").asText()).isEqualTo(snapshotReference.path("snapshotVersion").asText());
+        assertThat(validationPayload.get("snapshotSchemaVersion").asText())
+                .isEqualTo(snapshotReference.path("snapshotSchemaVersion").asText());
+        assertThat(validationPayload.get("snapshotDigest").asText())
+                .isEqualTo(snapshotReference.path("snapshotDigest").asText());
+        assertThat(validationPayload.get("featureSchemaVersion").asText()).isEqualTo("phase-2-loan-features.v1.0.0");
+        assertThat(validationPayload.get("preprocessingVersion").asText()).isEqualTo("preprocess.v1.0.0");
+        assertThat(validationPayload.get("modelVersion").asText()).isEqualTo("loan-model.v1.0.0");
+        assertThat(validationPayload.get("modelArtifactDigest").asText())
+                .isEqualTo("sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        assertThat(validationPayload.get("thresholdVersion").asText()).isEqualTo("threshold.v1.0.0");
+        assertThat(validationPayload.get("agentResultReference").asText())
+                .startsWith("agent-result://" + response.caseId() + "/" + agentRunId + "/attempt-");
+        assertThat(validationPayload.get("agentResultDigest").asText()).startsWith("sha256:");
         assertThat(agentClient.lastRequest().hasNonNull("featurePayload")).isTrue();
         EvaluationRunEntity run = evaluationRuns.findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
                 .orElseThrow();
@@ -190,7 +210,7 @@ class DecisionCaseServiceIntegrationTest {
                 .containsExactlyInAnyOrder(
                         "governance.review.started.v1",
                         "agent.evaluation.requested.v1",
-                        "governance.agent-result.validated.v1"
+                        "governance.agent-result.validated.v2"
                 );
         assertThat(completedRun.getSnapshotId()).isEqualTo(snapshotClient.lastSnapshot().snapshotId().toString());
         assertThat(completedRun.getAgentRunId()).isEqualTo(pendingRun.getAgentRunId());
@@ -261,7 +281,7 @@ class DecisionCaseServiceIntegrationTest {
                 .orElseThrow();
         assertThat(completedRun.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
         assertThat(completedRun.getAttemptCount()).isEqualTo(2);
-        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v1")))
+        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v2")))
                 .containsExactly("SCHEMA_VALID", "MODEL_PROVENANCE_VALID", "SNAPSHOT_MATCHED", "SHAP_PRESENT");
     }
 
@@ -431,10 +451,37 @@ class DecisionCaseServiceIntegrationTest {
                 .containsExactlyInAnyOrder(
                         "governance.review.started.v1",
                         "agent.evaluation.requested.v1",
-                        "governance.agent-result.validated.v1"
+                        "governance.agent-result.validated.v2"
                 );
-        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v1")))
+        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v2")))
                 .containsExactly("SCHEMA_INVALID");
+    }
+
+    @Test
+    void missingPersistedProvenanceBlocksWithoutValidationEvent() {
+        UUID applicationId = UUID.fromString("10000000-0000-4000-8000-000000000021");
+        EventEnvelope event = submitted(applicationId);
+        agentClient.timeoutNextCalls(1);
+
+        service.handleLoanApplicationSubmitted(event);
+
+        var response = service.getByApplication(applicationId);
+        EvaluationRunEntity run = evaluationRuns
+                .findFirstByDecisionCaseCaseIdOrderByCreatedAtDesc(response.caseId())
+                .orElseThrow();
+        jdbc.update(
+                "update evaluation_run set request_event_id = null, next_attempt_at = ?, lease_until = null where evaluation_run_id = ?",
+                Timestamp.from(Instant.now().minusSeconds(1)),
+                run.getEvaluationRunId()
+        );
+
+        service.handleLoanApplicationSubmitted(event);
+
+        EvaluationRunEntity blockedRun = evaluationRuns.findById(run.getEvaluationRunId()).orElseThrow();
+        assertThat(blockedRun.getStatus()).isEqualTo(EvaluationRunStatus.BLOCKED);
+        assertThat(blockedRun.getFailureReasonCode()).isEqualTo("VALIDATION_EVENT_PROVENANCE_MISSING");
+        assertThat(outbox.findAll()).extracting("eventType")
+                .containsOnly("governance.review.started.v1", "agent.evaluation.requested.v1");
     }
 
     @Test
@@ -573,7 +620,7 @@ class DecisionCaseServiceIntegrationTest {
         assertThat(response.status()).isEqualTo(DecisionCaseStatus.PROPOSAL_READY);
         assertThat(run.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
         assertThat(outbox.findAll()).extracting("eventType")
-                .contains("governance.agent-result.validated.v1");
+                .contains("governance.agent-result.validated.v2");
     }
 
     @Test

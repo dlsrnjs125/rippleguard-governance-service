@@ -15,7 +15,7 @@ Governance Core service. It owns Decision Case and Evaluation Run state, consume
 ## Events
 
 - Consumes: `loan.application.submitted.v1`
-- Publishes: `governance.review.started.v1`, `governance.agent-result.validated.v1`
+- Publishes: `governance.review.started.v1`, `governance.agent-result.validated.v2`
 
 Phase 2 does not emit `loan.decision.commanded.v1` from Agent proposals. Final Loan state changes remain outside this service path.
 

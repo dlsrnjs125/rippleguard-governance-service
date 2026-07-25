@@ -11,8 +11,8 @@
 9. Write the durable `agent.evaluation.requested.v1` request event to outbox and store its `eventId` on the Evaluation Run.
 10. Record the attempt and execution lease in the DB, then call Loan Decision Agent Runtime outside the DB transaction.
 11. Validate the Agent Result against Contracts and immutable request identity.
-12. If validation passes for a completed result, store the accepted proposal snapshot, move the case to `PROPOSAL_READY`, and write `governance.agent-result.validated.v1` with `VALIDATED`.
-13. If validation fails or the Agent returns a failed result, move the case to `VERIFICATION_REQUIRED` or `BLOCKED` and write `governance.agent-result.validated.v1` with `REJECTED`.
+12. If validation passes for a completed result, store the accepted proposal snapshot, move the case to `PROPOSAL_READY`, and write `governance.agent-result.validated.v2` with `VALIDATED`.
+13. If validation fails or the Agent returns a failed result, move the case to `VERIFICATION_REQUIRED` or `BLOCKED` and write `governance.agent-result.validated.v2` with `REJECTED`.
 
 Kafka publish failure leaves rows in the outbox for retry. Unknown schema versions are quarantined and are not treated as completed inbox records. If the inbox row is committed but the external Agent Runtime call does not complete, duplicate event delivery and the scheduled recovery loop resume the existing `RUNNING` Evaluation Run instead of treating the inbox row as complete business processing.
 
@@ -20,4 +20,4 @@ Governance does not publish `agent.evaluation.completed.v1` or `loan.decision.co
 
 Governance emits `MATERIALIZED_FEATURES` Agent Requests. It does not fall back to current Loan Application state, cached prior payloads, latest snapshots, mock proposals, or default proposals when Feature Snapshot acquisition fails.
 
-Outbox publication ordering is guaranteed for Governance-owned predecessors stored in the same outbox table. For example, `governance.agent-result.validated.v1` is not claimable until its causative `agent.evaluation.requested.v1` outbox row is published. External predecessors such as Loan Service submitted events are not stored in the Governance outbox, so their ordering depends on Kafka key ordering and downstream Audit out-of-order handling.
+Outbox publication ordering is guaranteed for Governance-owned predecessors stored in the same outbox table. For example, `governance.agent-result.validated.v2` is not claimable until its causative `agent.evaluation.requested.v1` outbox row is published. External predecessors such as Loan Service submitted events are not stored in the Governance outbox, so their ordering depends on Kafka key ordering and downstream Audit out-of-order handling.

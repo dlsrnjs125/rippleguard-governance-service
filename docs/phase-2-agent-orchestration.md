@@ -14,14 +14,20 @@ The normal path is:
 8. Validate the Agent Result with Contracts.
 9. Compare immutable request/result fields.
 10. Store the accepted proposal snapshot only after validation.
-11. Emit `governance.agent-result.validated.v1` as `VALIDATED` or `REJECTED` with `causationId` equal to the persisted request event id.
+11. Emit `governance.agent-result.validated.v2` as `VALIDATED` or `REJECTED` with `causationId` equal to the persisted request event id.
 
 Governance does not compute model scores, SHAP values, final Loan status, or fallback proposals. `loan.decision.commanded.v1` is not emitted from the Phase 2 proposal-only path.
 
 If Governance commits the inbox row and crashes before or during the external Agent Runtime call, duplicate delivery of the same Loan submitted event resumes the existing `RUNNING` Evaluation Run instead of skipping it. A scheduled recovery loop also scans `RUNNING` Evaluation Runs whose lease expired and whose `nextAttemptAt` has arrived.
 
-Transport timeout or connection failure is recorded as Governance orchestration failure state and retry metadata on `evaluation_run`. It is not treated as an Agent Runtime `FAILED` result and does not emit `governance.agent-result.validated.v1` unless a real Agent result payload is available or the failure is a Governance validation rejection.
+Transport timeout or connection failure is recorded as Governance orchestration failure state and retry metadata on `evaluation_run`. It is not treated as an Agent Runtime `FAILED` result and does not emit `governance.agent-result.validated.v2` unless a real Agent result payload is available or the failure is a Governance validation rejection.
 
 Loan Feature Snapshot timeout is retryable before Governance persists a new Evaluation Run. Snapshot 404 is mapped to verification required. Snapshot or Feature Payload digest mismatch is blocked. Feature Payload contract invalidity is mapped to validation required.
+
+## Validation Event Versioning
+
+Phase 2 Agent orchestration publishes `governance.agent-result.validated.v2` only. Governance does not dual-publish the previous V1 validation event because two validation events for the same `agentRunId` can create duplicate Audit timeline projections. Migration is handled by routing the Phase 2 validation topic/consumer to V2 while older V1 rows remain historical outbox data.
+
+The V2 payload is provenance-complete and is built only from the persisted `EvaluationRun`, the validated Agent Result, and the persisted `agent.evaluation.requested.v1` `eventId`. If persisted snapshot, model, preprocessing, threshold, or request-event provenance is missing, Governance blocks the Evaluation Run and does not emit a validation event.
 
 The Governance outbox enforces publication ordering only for Governance-owned predecessor events stored in the same table. External Loan events are ordered by Kafka key and reconciled by Audit timeline policies.
