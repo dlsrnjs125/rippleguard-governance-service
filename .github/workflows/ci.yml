@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: dlsrnjs125/rippleguard-contracts
-          ref: 751f43c88c1bef860c76398eed24b3d60225b931
+          ref: 5781bd30f688c25ae0d531049d6d7fb39ec3e9b1
           path: rippleguard-contracts
       - uses: actions/setup-java@v4
         with:
