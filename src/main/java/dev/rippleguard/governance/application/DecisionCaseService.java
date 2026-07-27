@@ -44,14 +44,14 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class DecisionCaseService {
     private static final Logger log = LoggerFactory.getLogger(DecisionCaseService.class);
     private static final String LOAN_SUBMITTED_SCHEMA_VERSION = "1.1.0";
-    private static final String GOVERNANCE_AGENT_EVENT_SCHEMA_VERSION = "1.0.0";
+    private static final String GOVERNANCE_AGENT_EVENT_SCHEMA_VERSION = "2.0.0";
     private static final String REQUESTED_EVENT_SCHEMA_VERSION = "1.1.0";
     private static final String REQUEST_SCHEMA = "commands/loan-decision-agent-request.v1.0.0.schema.json";
     private static final String RESULT_SCHEMA = "agent-output/loan-decision-agent-result.v1.0.0.schema.json";
     private static final String SNAPSHOT_REFERENCE_SCHEMA = "domain/snapshot-reference.v1.0.0.schema.json";
     private static final String FEATURE_PAYLOAD_SCHEMA = "domain/feature-payload.v1.0.0.schema.json";
     private static final String REQUESTED_EVENT_SCHEMA = "events/agent.evaluation.requested.v1.1.0.schema.json";
-    private static final String VALIDATED_EVENT_SCHEMA = "events/governance.agent-result.validated.v1.0.0.schema.json";
+    private static final String VALIDATED_EVENT_SCHEMA = "events/governance.agent-result.validated.v2.0.0.schema.json";
 
     private final DecisionCaseRepository decisionCases;
     private final EvaluationRunRepository evaluationRuns;
@@ -371,6 +371,9 @@ public class DecisionCaseService {
         run.recordAttempt(claimedAttemptId);
         String resultDigest = json.sha256Prefixed(json.canonicalJson(malformedResult));
         Instant now = clock.instant();
+        if (blockMissingValidationEventProvenance(decisionCase, run, resultDigest, now)) {
+            return;
+        }
         run.rejectPhase2("VALIDATION_REQUIRED", "CONTRACT_VALIDATION_FAILED", resultDigest, now);
         decisionCase.markVerificationRequired("CONTRACT_VALIDATION_FAILED", "AGENT_RESULT_REJECTED", now);
         outbox.save(agentResultValidatedEvent(decisionCase, run, claimedAttemptId, resultDigest,
@@ -400,6 +403,9 @@ public class DecisionCaseService {
         }
         boolean completed = "COMPLETED".equals(result.path("resultStatus").asText());
         Instant completedAt = parseInstant(result.path("completedAt").asText());
+        if (blockMissingValidationEventProvenance(decisionCase, run, resultDigest, completedAt)) {
+            return;
+        }
         if (!isAcceptedRuntimeAttempt(attemptId, claimedAttemptId)) {
             run.rejectPhase2("BLOCKED", "AGENT_ATTEMPT_MISMATCH", resultDigest, completedAt);
             decisionCase.markBlocked("AGENT_ATTEMPT_MISMATCH", "AGENT_RESULT_REJECTED", completedAt);
@@ -599,6 +605,32 @@ public class DecisionCaseService {
                 && reasonCodes.contains("SNAPSHOT_MATCHED");
     }
 
+    private boolean blockMissingValidationEventProvenance(DecisionCaseEntity decisionCase, EvaluationRunEntity run,
+                                                          String resultDigest, Instant failedAt) {
+        if (validationEventProvenanceAvailable(run)) {
+            return false;
+        }
+        run.rejectPhase2("BLOCKED", "VALIDATION_EVENT_PROVENANCE_MISSING", resultDigest, failedAt);
+        decisionCase.markBlocked("VALIDATION_EVENT_PROVENANCE_MISSING", "AGENT_RESULT_REJECTED", failedAt);
+        log.warn("Blocked Phase 2 validation event because persisted provenance is incomplete evaluationRunId={}",
+                run.getEvaluationRunId());
+        return true;
+    }
+
+    private boolean validationEventProvenanceAvailable(EvaluationRunEntity run) {
+        return run.getRequestEventId() != null
+                && run.getAgentRunId() != null
+                && hasText(run.getSnapshotId())
+                && hasText(run.getInputSnapshotVersion())
+                && hasText(run.getSnapshotSchemaVersion())
+                && hasText(run.getSnapshotDigest())
+                && hasText(run.getFeatureSchemaVersion())
+                && hasText(run.getPreprocessingVersion())
+                && hasText(run.getModelVersion())
+                && hasText(run.getModelArtifactDigest())
+                && hasText(run.getThresholdVersion());
+    }
+
     private String requestIdempotencyKey(String decisionCaseId, UUID evaluationRunId, String snapshotVersion,
                                          String snapshotDigest, String featurePayloadDigest) {
         Map<String, Object> keyInputs = new LinkedHashMap<>();
@@ -618,6 +650,10 @@ public class DecisionCaseService {
 
     private List<String> validatedReasonCodes() {
         return List.of("SCHEMA_VALID", "MODEL_PROVENANCE_VALID", "SNAPSHOT_MATCHED", "SHAP_PRESENT");
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     private boolean matchesText(JsonNode result, String field, String expected) {
@@ -835,13 +871,22 @@ public class DecisionCaseService {
         payload.put("evaluationRunId", run.getEvaluationRunId().toString());
         payload.put("agentRunId", run.getAgentRunId().toString());
         payload.put("attemptId", attemptId);
-        payload.put("agentResultReference", "agent-result://" + decisionCase.getCaseId() + "/" + run.getAgentRunId() + "/attempt-" + attemptId);
-        payload.put("agentResultDigest", resultDigest);
         payload.put("validationOutcome", outcome);
         payload.put("validationReasonCodes", reasonCodes);
-        payload.put("validatedSchemaVersion", "1.0.0");
+        payload.put("snapshotId", run.getSnapshotId());
+        payload.put("snapshotVersion", run.getInputSnapshotVersion());
+        payload.put("snapshotSchemaVersion", run.getSnapshotSchemaVersion());
+        payload.put("snapshotDigest", run.getSnapshotDigest());
+        payload.put("featureSchemaVersion", run.getFeatureSchemaVersion());
+        payload.put("preprocessingVersion", run.getPreprocessingVersion());
+        payload.put("modelVersion", run.getModelVersion());
+        payload.put("modelArtifactDigest", run.getModelArtifactDigest());
+        payload.put("thresholdVersion", run.getThresholdVersion());
+        payload.put("agentResultReference", "agent-result://" + decisionCase.getCaseId() + "/" + run.getAgentRunId() + "/attempt-" + attemptId);
+        payload.put("agentResultDigest", resultDigest);
+        payload.put("requestEventId", run.getRequestEventId().toString());
         payload.put("validatedAt", now.toString());
-        OutboxEventEntity event = event("governance.agent-result.validated.v1", GOVERNANCE_AGENT_EVENT_SCHEMA_VERSION,
+        OutboxEventEntity event = event("governance.agent-result.validated.v2", GOVERNANCE_AGENT_EVENT_SCHEMA_VERSION,
                 decisionCase, run.getEvaluationRunId(), run.getRequestEventId(), payload, now);
         contracts.validate(VALIDATED_EVENT_SCHEMA, json.toJsonNode(json.fromJson(event.getPayload(), Map.class)));
         return event;

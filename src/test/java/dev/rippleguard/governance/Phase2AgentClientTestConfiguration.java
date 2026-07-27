@@ -11,6 +11,8 @@ import dev.rippleguard.governance.application.LoanDecisionAgentClient;
 import dev.rippleguard.governance.application.Phase2FeatureSnapshot;
 import dev.rippleguard.governance.infrastructure.agent.AgentRuntimeTimeoutException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -163,6 +165,7 @@ public class Phase2AgentClientTestConfiguration {
         private volatile String snapshotValueOverride;
         private volatile boolean malformedResult;
         private volatile boolean retryableFailure;
+        private final List<JsonNode> requests = Collections.synchronizedList(new ArrayList<>());
         private volatile JsonNode lastRequest;
 
         RecordingLoanDecisionAgentClient(ObjectMapper objectMapper) {
@@ -172,7 +175,9 @@ public class Phase2AgentClientTestConfiguration {
         @Override
         public JsonNode execute(JsonNode request) {
             calls.incrementAndGet();
-            lastRequest = request.deepCopy();
+            JsonNode requestCopy = request.deepCopy();
+            requests.add(requestCopy);
+            lastRequest = requestCopy;
             if (timeoutsBeforeSuccess > 0) {
                 timeoutsBeforeSuccess--;
                 throw new AgentRuntimeTimeoutException("test timeout", null);
@@ -259,6 +264,7 @@ public class Phase2AgentClientTestConfiguration {
             snapshotValueOverride = null;
             malformedResult = false;
             retryableFailure = false;
+            requests.clear();
             lastRequest = null;
         }
 
@@ -292,6 +298,10 @@ public class Phase2AgentClientTestConfiguration {
 
         JsonNode lastRequest() {
             return lastRequest;
+        }
+
+        JsonNode requestAt(int index) {
+            return requests.get(index);
         }
     }
 }
