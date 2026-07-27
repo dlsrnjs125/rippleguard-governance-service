@@ -1,6 +1,7 @@
 package dev.rippleguard.governance;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,6 +17,7 @@ import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunEntity
 import dev.rippleguard.governance.infrastructure.persistence.EvaluationRunRepository;
 import dev.rippleguard.governance.infrastructure.persistence.GovernanceEventQuarantineRepository;
 import dev.rippleguard.governance.infrastructure.persistence.OutboxEventRepository;
+import dev.rippleguard.governance.infrastructure.contracts.ContractSchemaValidator;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -56,6 +58,9 @@ class DecisionCaseServiceIntegrationTest {
 
     @Autowired
     ObjectMapper objectMapper;
+
+    @Autowired
+    ContractSchemaValidator contracts;
 
     @Autowired
     JdbcTemplate jdbc;
@@ -281,8 +286,36 @@ class DecisionCaseServiceIntegrationTest {
                 .orElseThrow();
         assertThat(completedRun.getStatus()).isEqualTo(EvaluationRunStatus.COMPLETED);
         assertThat(completedRun.getAttemptCount()).isEqualTo(2);
-        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v2")))
+        JsonNode firstRequest = agentClient.requestAt(0);
+        JsonNode retriedRequest = agentClient.requestAt(1);
+        assertThat(retriedRequest.path("snapshotReference")).isEqualTo(firstRequest.path("snapshotReference"));
+        assertThat(retriedRequest.path("featureSchemaVersion").asText())
+                .isEqualTo(firstRequest.path("featureSchemaVersion").asText());
+        assertThat(retriedRequest.path("preprocessingVersion").asText())
+                .isEqualTo(firstRequest.path("preprocessingVersion").asText());
+        assertThat(retriedRequest.path("modelVersion").asText()).isEqualTo(firstRequest.path("modelVersion").asText());
+        assertThat(retriedRequest.path("modelArtifactDigest").asText())
+                .isEqualTo(firstRequest.path("modelArtifactDigest").asText());
+        assertThat(retriedRequest.path("thresholdVersion").asText())
+                .isEqualTo(firstRequest.path("thresholdVersion").asText());
+        assertThat(retriedRequest.path("agentRunId").asText()).isEqualTo(firstRequest.path("agentRunId").asText());
+
+        JsonNode validationEvent = validationEvent(outboxRowsByCreatedAt());
+        assertValidValidationEventContract(validationEvent);
+        JsonNode validationPayload = validationEvent.get("payload");
+        assertThat(validationReasonCodes(validationEvent.toString()))
                 .containsExactly("SCHEMA_VALID", "MODEL_PROVENANCE_VALID", "SNAPSHOT_MATCHED", "SHAP_PRESENT");
+        assertValidationPayloadMatchesRunProvenance(validationPayload, completedRun);
+        assertThat(validationPayload.path("snapshotDigest").asText())
+                .isEqualTo(firstRequest.path("snapshotReference").path("snapshotDigest").asText());
+        assertThat(validationPayload.path("modelVersion").asText()).isEqualTo(firstRequest.path("modelVersion").asText());
+        assertThat(validationPayload.path("modelArtifactDigest").asText())
+                .isEqualTo(firstRequest.path("modelArtifactDigest").asText());
+        assertThat(validationPayload.path("preprocessingVersion").asText())
+                .isEqualTo(firstRequest.path("preprocessingVersion").asText());
+        assertThat(validationPayload.path("thresholdVersion").asText())
+                .isEqualTo(firstRequest.path("thresholdVersion").asText());
+        assertThat(validationPayload.path("agentRunId").asText()).isEqualTo(firstRequest.path("agentRunId").asText());
     }
 
     @Test
@@ -453,8 +486,17 @@ class DecisionCaseServiceIntegrationTest {
                         "agent.evaluation.requested.v1",
                         "governance.agent-result.validated.v2"
                 );
-        assertThat(validationReasonCodes(payloadFor(outboxRowsByCreatedAt(), "governance.agent-result.validated.v2")))
+        assertThat(countByEventType("governance.agent-result.validated.v2")).isEqualTo(1);
+        JsonNode validationEvent = validationEvent(outboxRowsByCreatedAt());
+        assertValidValidationEventContract(validationEvent);
+        JsonNode validationPayload = validationEvent.get("payload");
+        assertThat(validationPayload.path("validationOutcome").asText()).isEqualTo("REJECTED");
+        assertThat(validationReasonCodes(validationEvent.toString()))
                 .containsExactly("SCHEMA_INVALID");
+        assertValidationPayloadMatchesRunProvenance(validationPayload, run);
+        assertThat(validationPayload.path("agentResultReference").asText())
+                .startsWith("agent-result://" + response.caseId() + "/" + run.getAgentRunId() + "/attempt-");
+        assertThat(validationPayload.path("agentResultDigest").asText()).startsWith("sha256:");
     }
 
     @Test
@@ -702,6 +744,38 @@ class DecisionCaseServiceIntegrationTest {
                 .findFirst()
                 .orElseThrow()
                 .payload();
+    }
+
+    private JsonNode validationEvent(List<OutboxRow> rows) {
+        try {
+            return objectMapper.readTree(payloadFor(rows, "governance.agent-result.validated.v2"));
+        } catch (Exception exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    private void assertValidValidationEventContract(JsonNode validationEvent) {
+        assertThatCode(() -> contracts.validate("events/governance.agent-result.validated.v2.0.0.schema.json",
+                validationEvent))
+                .doesNotThrowAnyException();
+    }
+
+    private void assertValidationPayloadMatchesRunProvenance(JsonNode payload, EvaluationRunEntity run) {
+        assertThat(payload.path("snapshotId").asText()).isEqualTo(run.getSnapshotId());
+        assertThat(payload.path("snapshotVersion").asText()).isEqualTo(run.getInputSnapshotVersion());
+        assertThat(payload.path("snapshotSchemaVersion").asText()).isEqualTo(run.getSnapshotSchemaVersion());
+        assertThat(payload.path("snapshotDigest").asText()).isEqualTo(run.getSnapshotDigest());
+        assertThat(payload.path("featureSchemaVersion").asText()).isEqualTo(run.getFeatureSchemaVersion());
+        assertThat(payload.path("preprocessingVersion").asText()).isEqualTo(run.getPreprocessingVersion());
+        assertThat(payload.path("modelVersion").asText()).isEqualTo(run.getModelVersion());
+        assertThat(payload.path("modelArtifactDigest").asText()).isEqualTo(run.getModelArtifactDigest());
+        assertThat(payload.path("thresholdVersion").asText()).isEqualTo(run.getThresholdVersion());
+        assertThat(payload.path("requestEventId").asText()).isEqualTo(run.getRequestEventId().toString());
+        assertThat(payload.path("agentRunId").asText()).isEqualTo(run.getAgentRunId().toString());
+    }
+
+    private Long countByEventType(String eventType) {
+        return jdbc.queryForObject("select count(*) from outbox_event where event_type = ?", Long.class, eventType);
     }
 
     private Instant occurredAt(String payload) {

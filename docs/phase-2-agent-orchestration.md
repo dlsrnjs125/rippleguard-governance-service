@@ -31,3 +31,17 @@ Phase 2 Agent orchestration publishes `governance.agent-result.validated.v2` onl
 The V2 payload is provenance-complete and is built only from the persisted `EvaluationRun`, the validated Agent Result, and the persisted `agent.evaluation.requested.v1` `eventId`. If persisted snapshot, model, preprocessing, threshold, or request-event provenance is missing, Governance blocks the Evaluation Run and does not emit a validation event.
 
 The Governance outbox enforces publication ordering only for Governance-owned predecessor events stored in the same table. External Loan events are ordered by Kafka key and reconciled by Audit timeline policies.
+
+## Deployment Order
+
+V2-only production must be introduced in consumer-first order:
+
+1. Deploy Audit Replay with V1 and V2 validation-event consumer support.
+2. Verify V2 contract validation and Agent Run projection handling in Audit.
+3. Deploy Governance with the V2-only producer.
+4. Verify Governance creates no new `governance.agent-result.validated.v1` outbox rows.
+5. Allow historical unpublished V1 outbox rows to drain as V1 historical data. Do not convert them to V2.
+
+Rollback is allowed only while Audit continues to accept V1 validation events. Existing V2 outbox rows must not be rewritten as V1. If historical V1 rows and newer V2 rows exist for the same `agentRunId`, Audit must route by event type and apply its timeline de-duplication policy instead of treating V1/V2 dual rows as a valid new producer mode.
+
+The cross-repository deployment contract is tracked in `rippleguard-docs/phases/phase-02-loan-decision/v2-validation-event-migration.md`.
